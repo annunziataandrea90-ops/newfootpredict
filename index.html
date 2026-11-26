@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>FootPredict AI — ELO 10 Anni, Sistemi, Value &amp; Diario</title>
+  <title>FootPredict AI — ELO 10A, Quote Reali, Value &amp; Sistemi</title>
   <link rel="icon" href="data:," />
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
@@ -20,7 +20,7 @@
           ⚽ FootPredict
           <span id="modeBadge" class="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">CARICO...</span>
         </h1>
-        <p id="subStatus" class="text-[11px] text-slate-400">Poisson + ELO 10A + Sistemi • Value &amp; Diario</p>
+        <p id="subStatus" class="text-[11px] text-slate-400">Poisson + ELO 10A + Quote Reali • Value &amp; Diario</p>
       </div>
       <div class="flex flex-wrap bg-slate-900 p-1 rounded-xl border border-slate-800 gap-0.5">
         <button data-tab="ieri" class="tab-btn px-2 py-1 text-xs font-semibold rounded-lg text-slate-300">Ieri</button>
@@ -51,6 +51,7 @@
             <option value="time">Ordina: Orario</option>
             <option value="prob">Ordina: Probabilità ↓</option>
             <option value="conf">Ordina: Attendibilità ↓</option>
+            <option value="ev">Ordina: Value EV% ↓</option>
           </select>
         </div>
 
@@ -62,25 +63,36 @@
             </div>
             <input id="minConfSlider" type="range" min="0" max="90" step="5" value="0" class="w-full accent-emerald-500" />
           </div>
-          <div class="flex flex-wrap items-center justify-between sm:justify-end gap-3 text-[11px]">
-            <label class="flex items-center gap-1.5 cursor-pointer text-amber-300 font-semibold">
+          <div class="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 text-[11px]">
+            <label class="flex items-center gap-1 cursor-pointer text-amber-300 font-semibold">
               <input id="onlyPlayableToggle" type="checkbox" class="accent-amber-400" />
-              <span>Solo PRE / LIVE</span>
+              <span>PRE/LIVE</span>
             </label>
-            <label class="flex items-center gap-1.5 cursor-pointer text-emerald-300 font-semibold">
+            <label class="flex items-center gap-1 cursor-pointer text-fuchsia-300 font-semibold">
+              <input id="onlyValueToggle" type="checkbox" class="accent-fuchsia-400" />
+              <span>💎 Solo Value</span>
+            </label>
+            <label class="flex items-center gap-1 cursor-pointer text-emerald-300 font-semibold">
               <input id="autoCalToggle" type="checkbox" checked class="accent-emerald-500" />
-              <span>🧠 Auto-Calibra + ELO</span>
+              <span>🧠 ELO</span>
+            </label>
+            <label class="flex items-center gap-1 cursor-pointer text-cyan-300 font-semibold" title="Fonde 72% modello + 28% quote sharp quando disponibili">
+              <input id="marketBlendToggle" type="checkbox" checked class="accent-cyan-400" />
+              <span>⚖️ Mercato</span>
             </label>
           </div>
         </div>
 
         <div class="flex flex-wrap justify-between items-center gap-2 text-[11px] text-slate-400 pt-1.5 border-t border-slate-800">
           <span>Partite: <strong id="visibleCount" class="text-white">0</strong> • Top: <strong id="topPickCount" class="text-emerald-400">0</strong> • Presi: <strong id="hitCount" class="text-cyan-300">-</strong></span>
-          <div class="flex items-center gap-2">
-            <button id="refreshBtn" title="Aggiorna dati" class="text-cyan-400 font-semibold px-2 py-0.5 rounded hover:bg-slate-800">↻ Aggiorna</button>
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button id="oddsFetchBtn" class="px-2 py-1 rounded-lg bg-fuchsia-500/15 hover:bg-fuchsia-500/25 border border-fuchsia-500/35 text-fuchsia-300 font-bold text-[11px] disabled:opacity-50">💰 Scarica Quote</button>
+            <button id="oddsKeyBtn" title="Configura API Key The Odds API" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold text-[11px]">🔑</button>
+            <button id="refreshBtn" title="Aggiorna dati ESPN" class="text-cyan-400 font-semibold px-2 py-0.5 rounded hover:bg-slate-800">↻</button>
             <button id="toggleAllBtn" class="text-slate-300 font-semibold px-1.5 py-0.5 rounded hover:bg-slate-800">Comprimi</button>
           </div>
         </div>
+        <div id="oddsStatusLine" class="hidden text-[10px] text-fuchsia-300 pt-1 border-t border-slate-800/70"></div>
       </section>
 
       <section id="scheduleContainer" class="space-y-3"></section>
@@ -91,7 +103,7 @@
         <div class="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 class="text-sm font-bold text-white">📊 Storico 10 Anni, ELO &amp; Calibrazione</h2>
-            <p class="text-[11px] text-slate-400">Backtest cronologico senza leakage • Cache trimestrale IndexedDB</p>
+            <p class="text-[11px] text-slate-400">Backtest cronologico senza leakage • Cache mensile IndexedDB</p>
           </div>
           <div class="flex flex-wrap gap-1.5">
             <button id="btnScan1" onclick="scanSeason(365)" class="px-2.5 py-1.5 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 font-bold text-xs disabled:opacity-50">📥 1 Anno</button>
@@ -187,8 +199,8 @@
     </div>
   </div>
 
-  <script src="app1.js"></script>
-  <script src="app2.js"></script>
-  <script src="app3.js"></script>
+  <script src="app1.js?v=4"></script>
+  <script src="app2.js?v=4"></script>
+  <script src="app3.js?v=4"></script>
 </body>
 </html>
