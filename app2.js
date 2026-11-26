@@ -1,776 +1,504 @@
-const HIST_KEY = "fp_team_hist_10y";
-const LEGACY_HIST_KEY = "fp_team_hist_9m";
-const STANDINGS_KEY = "fp_standings_cache_v2";
-const BET_KEY = "fp_bet_log_v1";
-const SLIP_KEY = "fp_slip_v1";
-const STANDINGS_TTL = 30 * 60 * 1000;
-const EXTRA_RE = /\b(AET|ET|PEN|PENS|PSO|FT-PENS)\b/;
+let LEAGUES = [];
+const DAY_CACHE = {};
+let lastDiag = "";
+let currentLoadToken = 0;
+let currentModalToken = 0;
+const dayOffset = () => st.tab === "ieri" ? -1 : st.tab === "oggi" ? 0 : 1;
 
-const COMPS = [
-  ["ita.1", "Serie A", "Campionato", "🇮🇹"], ["ita.2", "Serie B", "Campionato", "🇮🇹"], ["ita.coppa_italia", "Coppa Italia", "Coppa", "🇮🇹"],
-  ["eng.1", "Premier League", "Campionato", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"], ["eng.2", "Championship", "Campionato", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"], ["eng.fa", "FA Cup", "Coppa", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"], ["eng.league_cup", "EFL Cup", "Coppa", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"],
-  ["esp.1", "La Liga", "Campionato", "🇪🇸"], ["esp.copa_del_rey", "Copa del Rey", "Coppa", "🇪🇸"],
-  ["ger.1", "Bundesliga", "Campionato", "🇩🇪"], ["ger.dfb_pokal", "DFB-Pokal", "Coppa", "🇩🇪"],
-  ["fra.1", "Ligue 1", "Campionato", "🇫🇷"], ["fra.coupe_de_france", "Coupe de France", "Coppa", "🇫🇷"],
-  ["ned.1", "Eredivisie", "Campionato", "🇳🇱"], ["por.1", "Liga Portugal", "Campionato", "🇵🇹"],
-  ["tur.1", "Süper Lig", "Campionato", "🇹🇷"], ["bel.1", "Pro League", "Campionato", "🇧🇪"], ["sco.1", "Premiership", "Campionato", "🏴󠁧󠁢󠁳󠁣󠁴󠁿"],
-  ["uefa.champions", "Champions League", "Coppa", "🏆"], ["uefa.europa", "Europa League", "Coppa", "🏆"], ["uefa.europa.conf", "Conference League", "Coppa", "🏆"],
-  ["uefa.nations", "Nations League", "Nazionali", "🌍"], ["fifa.worldq.uefa", "Qual. Mondiali UEFA", "Nazionali", "🌍"],
-  ["caf.nations", "Coppa d'Africa", "Nazionali", "🌍"], ["fifa.friendly", "Amichevoli Int.", "Nazionali", "🌍"],
-  ["bra.1", "Brasileirão", "Campionato", "🇧🇷"], ["arg.1", "Liga Profesional", "Campionato", "🇦🇷"], ["usa.1", "MLS", "Campionato", "🇺🇸"]
-];
-const AM_LEAGUES = new Set(["bra.1", "arg.1", "usa.1"]);
-const Q_PREFIX = "fp_q4_" + COMPS.length + "_";
-const MONTH_PREFIX = "fp_m4_" + COMPS.length + "_";
-
-let TEAM_HIST_CACHE = {};
-let standingsCache = {};
-let BET_LOG = [];
-const GLOBAL_TEAM_STATS = {};
-const SLIP = new Map();
-const st = {
-  tab: "oggi", search: "", minConf: 0, market: "all", sort: "league",
-  onlyPlayable: false, collapsed: new Set(), allCollapsed: false, autoCal: true
-};
-
-const LEAGUE_TIER = {
-  "eng.1": { s: 1.00, elo: 1580 }, "esp.1": { s: 1.00, elo: 1570 }, "ita.1": { s: 1.00, elo: 1570 },
-  "ger.1": { s: 0.99, elo: 1560 }, "fra.1": { s: 0.97, elo: 1545 },
-  "por.1": { s: 0.90, elo: 1490 }, "ned.1": { s: 0.90, elo: 1490 }, "eng.2": { s: 0.89, elo: 1475 },
-  "bra.1": { s: 0.91, elo: 1500 }, "arg.1": { s: 0.89, elo: 1480 },
-  "bel.1": { s: 0.85, elo: 1445 }, "tur.1": { s: 0.85, elo: 1445 }, "sco.1": { s: 0.82, elo: 1415 },
-  "ita.2": { s: 0.83, elo: 1420 }, "usa.1": { s: 0.84, elo: 1430 }
-};
-
-let dbPromise = null;
-function openDB() {
-  if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
-    if (!window.indexedDB) { dbPromise = null; return reject(new Error("No IDB")); }
-    const req = indexedDB.open("FootPredictDB", 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
-    };
-    req.onsuccess = () => {
-      const db = req.result;
-      db.onclose = () => { dbPromise = null; };
-      resolve(db);
-    };
-    req.onerror = () => { dbPromise = null; reject(req.error); };
-    req.onblocked = () => { dbPromise = null; reject(new Error("IDB blocked")); };
-  });
-  return dbPromise;
+function recalcAllPredictions() {
+  LEAGUES.forEach(l => l.matches.forEach(m => { m.prediction = calcPred(m); }));
 }
 
-async function idbGet(key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("kv", "readonly");
-    const req = tx.objectStore("kv").get(key);
-    req.onsuccess = () => resolve(req.result ?? null);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function idbSet(key, val) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("kv", "readwrite");
-    tx.objectStore("kv").put(val, key);
-    tx.oncomplete = () => resolve(true);
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function idbDel(key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("kv", "readwrite");
-    tx.objectStore("kv").delete(key);
-    tx.oncomplete = () => resolve(true);
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function idbDelByPrefix(prefix) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("kv", "readwrite");
-    const store = tx.objectStore("kv");
-    const keysReq = store.getAllKeys();
-    keysReq.onsuccess = () => {
-      (keysReq.result || []).forEach(k => {
-        if (typeof k === "string" && k.startsWith(prefix)) store.delete(k);
-      });
-    };
-    tx.oncomplete = () => resolve(true);
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-function indexGlobalStandings() {
-  Object.entries(standingsCache).forEach(([slug, entry]) => {
-    if (!entry?.map) return;
-    Object.entries(entry.map).forEach(([tid, obj]) => {
-      if (!GLOBAL_TEAM_STATS[tid] || obj.played > GLOBAL_TEAM_STATS[tid].played) {
-        GLOBAL_TEAM_STATS[tid] = { ...obj, domSlug: slug };
-      }
-    });
-  });
-}
-
-function sanitizeTeamHist(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const clean = {};
-  Object.entries(raw).forEach(([tid, t]) => {
-    if (!t || typeof t !== "object" || !Array.isArray(t.m)) return;
-    const tot = Number(t.tot);
-    if (!Number.isFinite(tot) || tot <= 0) return;
-    clean[tid] = {
-      id: String(t.id ?? tid), n: String(t.n || "Squadra"), tot,
-      elo: Number.isFinite(Number(t.elo)) ? Number(t.elo) : 1500,
-      hit: Number(t.hit) || 0, ou: Number(t.ou) || 0,
-      tTot: Number(t.tTot) || 0, tHit: Number(t.tHit) || 0,
-      eg: Number(t.eg) || 0, rg: Number(t.rg) || 0,
-      gf: Number(t.gf) || 0, ga: Number(t.ga) || 0,
-      egf: Number(t.egf) || 0, ega: Number(t.ega) || 0,
-      m: t.m.filter(x => x && typeof x === "object" && typeof x.p === "string")
-    };
-  });
-  return clean;
-}
-
-function saveSlip() {
-  try { localStorage.setItem(SLIP_KEY, JSON.stringify(Array.from(SLIP.entries()))); } catch {}
-}
-
-function loadSlip() {
+async function fetchScoreboardDay(slug, dp, diag) {
   try {
-    const raw = localStorage.getItem(SLIP_KEY);
-    if (!raw) return;
-    const arr = JSON.parse(raw);
-    if (Array.isArray(arr)) {
-      arr.slice(0, 8).forEach(([id, item]) => {
-        if (id && item && typeof item.code === "string" && Number.isFinite(item.prob)) SLIP.set(id, item);
-      });
-    }
-  } catch {}
-}
-
-async function initStorage() {
-  loadSlip();
-  renderSlipBar();
-  try {
-    const [hist10y, hist9m, stdIdb, betIdb] = await Promise.all([
-      idbGet(HIST_KEY), idbGet(LEGACY_HIST_KEY), idbGet(STANDINGS_KEY), idbGet(BET_KEY)
-    ]);
-    if (hist10y && typeof hist10y === "object") {
-      TEAM_HIST_CACHE = sanitizeTeamHist(hist10y);
-    } else if (hist9m && typeof hist9m === "object") {
-      TEAM_HIST_CACHE = sanitizeTeamHist(hist9m);
-      await idbSet(HIST_KEY, TEAM_HIST_CACHE);
-    } else {
-      const legacy = localStorage.getItem(HIST_KEY) || localStorage.getItem(LEGACY_HIST_KEY);
-      if (legacy) {
-        TEAM_HIST_CACHE = sanitizeTeamHist(JSON.parse(legacy));
-        await idbSet(HIST_KEY, TEAM_HIST_CACHE);
-      }
-    }
-    if (stdIdb && typeof stdIdb === "object") {
-      const now = Date.now();
-      Object.entries(stdIdb).forEach(([slug, val]) => {
-        if (val && (now - val.ts) < STANDINGS_TTL) standingsCache[slug] = val;
-      });
-      indexGlobalStandings();
-    }
-    if (Array.isArray(betIdb)) BET_LOG = betIdb;
-  } catch {
-    try {
-      const legacy = localStorage.getItem(HIST_KEY) || localStorage.getItem(LEGACY_HIST_KEY);
-      if (legacy) TEAM_HIST_CACHE = sanitizeTeamHist(JSON.parse(legacy));
-    } catch {}
-  }
-}
-
-async function saveTeamHist(data) {
-  TEAM_HIST_CACHE = sanitizeTeamHist(data);
-  try { await idbSet(HIST_KEY, TEAM_HIST_CACHE); }
-  catch { try { localStorage.setItem(HIST_KEY, JSON.stringify(TEAM_HIST_CACHE)); } catch {} }
-}
-
-async function saveBetLog() {
-  try { await idbSet(BET_KEY, BET_LOG); } catch {}
-}
-
-async function persistStandingsCache() {
-  try { await idbSet(STANDINGS_KEY, standingsCache); } catch {}
-}
-
-async function clearTeamHist() {
-  TEAM_HIST_CACHE = {};
-  try {
-    await idbDel(HIST_KEY);
-    await idbDel(LEGACY_HIST_KEY);
-    await idbDelByPrefix("fp_m");
-    await idbDelByPrefix("fp_q");
-  } catch {}
-  try {
-    localStorage.removeItem(HIST_KEY);
-    localStorage.removeItem(LEGACY_HIST_KEY);
-  } catch {}
-}
-
-const getTeamHist = () => TEAM_HIST_CACHE;
-const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
-}[c]));
-
-const debounce = (fn, ms = 150) => {
-  let timer;
-  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
-};
-
-async function mapWithConcurrency(items, limit, fn) {
-  const results = new Array(items.length);
-  let idx = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (idx < items.length) {
-      const cur = idx++;
-      results[cur] = await fn(items[cur], cur);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
-const sleep = ms => new Promise(res => setTimeout(res, ms));
-
-const ESPNProvider = {
-  async fetchWithTimeout(url, ms = 7000) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), ms);
-    try {
-      return await fetch(url, { signal: ctrl.signal });
-    } finally {
-      clearTimeout(timer);
-    }
-  },
-  async fetchScoreboard(slug, datesParam, limit = null, retries = 1) {
-    const limQ = limit ? `&limit=${limit}` : "";
-    const url = `https://site.api.espn.com/apis/site/v2/sports/soccer/${slug}/scoreboard?dates=${datesParam}${limQ}`;
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const r = await this.fetchWithTimeout(url, limit ? 9000 : 5000);
-        if (!r.ok) {
-          if ((r.status === 429 || r.status >= 500) && attempt < retries) {
-            await sleep(500 * (attempt + 1));
-            continue;
-          }
-          const err = new Error(`HTTP ${r.status}`); err.status = r.status; throw err;
-        }
-        const data = await r.json();
-        return data.events || [];
-      } catch (err) {
-        if (attempt < retries && !err?.status) {
-          await sleep(400 * (attempt + 1));
-          continue;
-        }
-        throw err;
-      }
-    }
+    const events = await ESPNProvider.fetchScoreboard(slug, dp, null, 0);
+    diag.ok++;
+    return events;
+  } catch (err) {
+    if (err?.status) { diag.httpErr++; diag.lastStatus = err.status; }
+    else { diag.netErr++; diag.lastErr = err?.message || "Errore rete/CORS"; }
     return [];
-  },
-  async fetchStandingsRaw(slug) {
-    const r = await this.fetchWithTimeout(`https://site.api.espn.com/apis/v2/sports/soccer/${slug}/standings`);
-    if (!r.ok) return null;
-    return await r.json();
-  },
-  async fetchSummary(slug, eventId) {
-    const r = await this.fetchWithTimeout(`https://site.api.espn.com/apis/site/v2/sports/soccer/${slug}/summary?event=${eventId}`, 5000);
-    if (!r.ok) return null;
-    return await r.json();
+  }
+}
+
+async function loadDay(offset, force = false) {
+  const token = ++currentLoadToken;
+  const badge = document.getElementById("modeBadge"), sub = document.getElementById("subStatus");
+  const dp = dateParam(offset), dpPrev = dateParam(offset - 1), tKey = targetDateKey(offset);
+  const ttl = offset === 0 ? 55 * 1000 : 10 * 60 * 1000;
+  const cached = DAY_CACHE[dp];
+
+  if (!force && cached && (Date.now() - cached.ts) < ttl) {
+    LEAGUES = cached.leagues;
+    lastDiag = cached.diagMsg || "";
+    recalcAllPredictions();
+    const tot = LEAGUES.reduce((s, l) => s + l.matches.length, 0);
+    badge.textContent = "LIVE REALE";
+    badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
+    sub.textContent = `${tot} partite (${dp.slice(6,8)}/${dp.slice(4,6)}) • Cache veloce`;
+    syncSlipFromLeagues();
+    renderSchedule();
+    return;
+  }
+
+  badge.textContent = "CARICO...";
+  badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30";
+  const diag = { ok: 0, httpErr: 0, netErr: 0, lastStatus: 0, lastErr: "" };
+
+  try {
+    let doneBoards = 0;
+    sub.textContent = `Scarico tornei 0/${COMPS.length}...`;
+    const boards = await mapWithConcurrency(COMPS, 8, async ([slug, name, kind, flag]) => {
+      let events = await fetchScoreboardDay(slug, dp, diag);
+      if (AM_LEAGUES.has(slug)) {
+        const prevEv = await fetchScoreboardDay(slug, dpPrev, diag);
+        const evMap = new Map();
+        prevEv.forEach(ev => { ev._espnDp = dpPrev; evMap.set(ev.id, ev); });
+        events.forEach(ev => { ev._espnDp = dp; evMap.set(ev.id, ev); });
+        events = Array.from(evMap.values()).filter(ev => localDateKey(new Date(ev.date)) === tKey);
+      }
+      doneBoards++;
+      if (token === currentLoadToken) sub.textContent = `Scarico tornei ${doneBoards}/${COMPS.length}...`;
+      return events.length ? { slug, name, kind, flag, events } : null;
+    });
+
+    if (token !== currentLoadToken) return;
+    if (diag.ok === 0) {
+      if (diag.httpErr > 0) throw new Error(`ESPN HTTP ${diag.lastStatus} su tutte le chiamate`);
+      throw new Error(diag.lastErr || "Connessione/CORS non riuscita");
+    }
+
+    const active = boards.filter(Boolean);
+    const hasClubCup = active.some(b => b.kind === "Coppa");
+    const slugsToFetch = active.filter(b => b.slug !== "fifa.friendly").map(b => [b.slug, b.name]);
+    if (hasClubCup) {
+      COMPS.filter(([, , kind]) => kind === "Campionato").forEach(([slug, name]) => {
+        if (!slugsToFetch.some(([s]) => s === slug)) slugsToFetch.push([slug, name]);
+      });
+    }
+    if (slugsToFetch.length) sub.textContent = `Scarico classifiche (${slugsToFetch.length})...`;
+    await mapWithConcurrency(slugsToFetch, 8, ([slug, name]) => fetchStandings(slug, name));
+    if (token !== currentLoadToken) return;
+    persistStandingsCache();
+
+    LEAGUES = active.map(b => {
+      const isLeague = b.kind === "Campionato", stdEntry = standingsCache[b.slug] || {}, tbl = stdEntry.map || {};
+      const leagueAvgH = isLeague ? safeNum(stdEntry.avgH, 1.48) : 1.48;
+      const leagueAvgA = isLeague ? safeNum(stdEntry.avgA, 1.18) : 1.18;
+
+      const matches = b.events.map(ev => {
+        const comp = ev.competitions?.[0] || {};
+        const isNeutral = Boolean(comp.neutralSite);
+        const home = (comp.competitors || []).find(c => c.homeAway === "home") || {};
+        const away = (comp.competitors || []).find(c => c.homeAway === "away") || {};
+        const hs = resolveTeamStats(home.team?.id, tbl, b.kind);
+        const as = resolveTeamStats(away.team?.id, tbl, b.kind);
+        const ok = Boolean(hs && as && hs.played >= 3 && as.played >= 3);
+        const hf = parseForm(home.form), af = parseForm(away.form);
+        const dt = new Date(ev.date), startTs = dt.getTime();
+        const timeStr = `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+
+        const statusObj = ev.status?.type || {}, statusName = statusObj.name || "";
+        const shortDet = (statusObj.shortDetail || "").toUpperCase();
+        const isExtra = EXTRA_RE.test(shortDet) || Number(ev.status?.period) > 2;
+        const isCanceled = statusName === "STATUS_POSTPONED" || statusName === "STATUS_CANCELED"
+          || statusName === "STATUS_ABANDONED" || statusName === "STATUS_SUSPENDED"
+          || (statusObj.state === "post" && statusObj.completed === false);
+        const stateType = isCanceled ? "canceled" : (statusObj.state || "pre");
+        const hasScore = home.score !== undefined && home.score !== "" && away.score !== undefined && away.score !== ""
+          && Number.isFinite(Number(home.score)) && Number.isFinite(Number(away.score));
+        const hScore = hasScore ? Number(home.score) : 0, aScore = hasScore ? Number(away.score) : 0;
+
+        let statusTxt = "PRE";
+        if (stateType === "in") statusTxt = ev.status?.displayClock || "LIVE";
+        else if (stateType === "post") statusTxt = isExtra ? (/\b(PEN|PENS|PSO|FT-PENS)\b/.test(shortDet) ? "RIG" : "SUPPL") : "FIN";
+        else if (stateType === "canceled") statusTxt = statusName === "STATUS_CANCELED" ? "CANC" : (statusName === "STATUS_SUSPENDED" || statusName === "STATUS_ABANDONED" ? "SOSP" : "RINV");
+
+        const effAvgH = isNeutral ? Number(((leagueAvgH + leagueAvgA) / 2).toFixed(3)) : leagueAvgH;
+        const effAvgA = isNeutral ? effAvgH : leagueAvgA;
+
+        const domStdH = hs?.domSlug ? standingsCache[hs.domSlug] : null;
+        const domAvgH = isNeutral ? Number((((domStdH?.avgH ?? leagueAvgH) + (domStdH?.avgA ?? leagueAvgA)) / 2).toFixed(3)) : safeNum(domStdH?.avgH, leagueAvgH);
+        const domAvgHA = isNeutral ? domAvgH : safeNum(domStdH?.avgA, leagueAvgA);
+
+        const domStdA = as?.domSlug ? standingsCache[as.domSlug] : null;
+        const domAvgAH = isNeutral ? Number((((domStdA?.avgH ?? leagueAvgH) + (domStdA?.avgA ?? leagueAvgA)) / 2).toFixed(3)) : safeNum(domStdA?.avgH, leagueAvgH);
+        const domAvgAA = isNeutral ? domAvgAH : safeNum(domStdA?.avgA, leagueAvgA);
+
+        const gpH = hs ? hs.played : 0, gpA = as ? as.played : 0;
+        const hEffGp = !hs ? 0 : (isNeutral ? gpH : (hs.hGp ?? Math.max(1, Math.round(gpH / 2))));
+        const aEffGp = !as ? 0 : (isNeutral ? gpA : (as.aGp ?? Math.max(1, Math.round(gpA / 2))));
+
+        const rawHGF = hs ? ((isNeutral ? hs.gfAvg : (hs.hGfAvg ?? hs.gfAvg * 1.08)) / domAvgH) * effAvgH : effAvgH;
+        const rawHGA = hs ? ((isNeutral ? hs.gaAvg : (hs.hGaAvg ?? hs.gaAvg * 0.92)) / domAvgHA) * effAvgA : effAvgA;
+        const rawAGF = as ? ((isNeutral ? as.gfAvg : (as.aGfAvg ?? as.gfAvg * 0.92)) / domAvgAA) * effAvgA : effAvgA;
+        const rawAGA = as ? ((isNeutral ? as.gaAvg : (as.aGaAvg ?? as.gaAvg * 1.08)) / domAvgAH) * effAvgH : effAvgH;
+
+        const hGF = shrink(clamp(rawHGF, 0.35, 3.8), hEffGp, effAvgH, 5);
+        const hGA = shrink(clamp(rawHGA, 0.30, 3.8), hEffGp, effAvgA, 5);
+        const aGF = shrink(clamp(rawAGF, 0.30, 3.8), aEffGp, effAvgA, 5);
+        const aGA = shrink(clamp(rawAGA, 0.35, 3.8), aEffGp, effAvgH, 5);
+
+        const hId = home.team?.id, aId = away.team?.id;
+        const domSlugH = hs?.domSlug || b.slug;
+        const domSlugA = as?.domSlug || b.slug;
+        const tierH = (LEAGUE_TIER[domSlugH]?.s) ?? 0.88;
+        const tierA = (LEAGUE_TIER[domSlugA]?.s) ?? 0.88;
+        const baseVol = b.slug === "fifa.friendly" ? 0.42 : (b.kind === "Nazionali" ? (ok ? 0.28 : 0.38) : (b.kind === "Coppa" ? (ok ? 0.25 : 0.37) : (ok ? 0.20 : 0.34)));
+
+        const m = {
+          id: ev.id, dp, espnDp: ev._espnDp || dp, slug: b.slug, leagueId: b.slug, leagueName: b.name, kind: b.kind, flag: b.flag,
+          time: timeStr, startTs, stateType, isExtra, hasScore, hScore, aScore, neutralSite: isNeutral,
+          scoreStr: ((stateType === "in" || stateType === "post") && hasScore) ? `${hScore} - ${aScore}` : "- : -",
+          statusTxt, homeId: hId, awayId: aId,
+          home: home.team?.displayName || "Casa", away: away.team?.displayName || "Ospite",
+          homeLogo: home.team?.logo || "", awayLogo: away.team?.logo || "", lowData: !ok,
+          formH: hf.pills, formA: af.pills,
+          statSourceH: hs ? `${hs.source} (${hs.played}g)` : "Default",
+          statSourceA: as ? `${as.source} (${as.played}g)` : "Default",
+          stats: {
+            avgH: effAvgH, avgA: effAvgA,
+            hGF: Number(safeNum(hGF, effAvgH).toFixed(2)), hGA: Number(safeNum(hGA, effAvgA).toFixed(2)),
+            aGF: Number(safeNum(aGF, effAvgA).toFixed(2)), aGA: Number(safeNum(aGA, effAvgH).toFixed(2)),
+            hFF: hf.factor, aFF: af.factor, hL: 1.0, aL: 1.0,
+            isCrossLeague: b.kind !== "Campionato", domSlugH, domSlugA, tierH, tierA,
+            comp: ok ? 0.92 : (home.form && away.form ? 0.72 : 0.54), vol: baseVol
+          }
+        };
+        m.prediction = calcPred(m);
+        return m;
+      });
+      return { id: b.slug, name: b.name, kind: b.kind, flag: b.flag, matches };
+    });
+
+    const tot = LEAGUES.reduce((s, l) => s + l.matches.length, 0);
+    lastDiag = tot === 0
+      ? `API OK su ${diag.ok}/${COMPS.length} tornei${diag.httpErr ? ` (HTTP ${diag.lastStatus} su ${diag.httpErr})` : ""}${diag.netErr ? ` (${diag.netErr} errori rete)` : ""} — nessuna gara trovata`
+      : "";
+    if (tot > 0 || (diag.httpErr === 0 && diag.netErr === 0)) {
+      DAY_CACHE[dp] = { ts: Date.now(), leagues: LEAGUES, diagMsg: lastDiag };
+    }
+    const nowStr = new Date().toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
+    badge.textContent = "LIVE REALE";
+    badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
+    sub.textContent = `${tot} partite (${dp.slice(6,8)}/${dp.slice(4,6)}) • Agg. ${nowStr}`;
+    syncSlipFromLeagues();
+    renderSchedule();
+  } catch (err) {
+    console.error("Errore loadDay:", err);
+    if (token !== currentLoadToken) return;
+    LEAGUES = [];
+    lastDiag = `Impossibile contattare site.api.espn.com (${err?.message || "connessione assente o blocco proxy/CORS"}).`;
+    badge.textContent = "OFFLINE";
+    badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30";
+    sub.textContent = "Controlla la connessione/rete e premi ↻";
+    renderSchedule();
+  }
+}
+
+let isScanning = false;
+let scanAborted = false;
+
+function setScanBusy(busy) {
+  isScanning = busy;
+  ["btnScan1", "btnScan5", "btnScan10", "btnResetHist", "btnExportHist"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = busy;
+  });
+  const stopBtn = document.getElementById("btnStopScan");
+  if (stopBtn) stopBtn.classList.toggle("hidden", !busy);
+}
+
+window.stopScan = () => {
+  if (!isScanning) return;
+  scanAborted = true;
+  document.getElementById("histScanStatus").textContent = "⏹️ Interruzione richiesta, completo il blocco corrente...";
+};
+
+function parseQuarterEvents(events, slug, compName, kind, flag, targetMap) {
+  events.forEach(ev => {
+    if (targetMap.has(ev.id)) return;
+    const stType = ev.status?.type, isExtra = EXTRA_RE.test((stType?.shortDetail || "").toUpperCase()) || Number(ev.status?.period) > 2;
+    const comp = ev.competitions?.[0] || {};
+    const home = (comp.competitors || []).find(c => c.homeAway === "home");
+    const away = (comp.competitors || []).find(c => c.homeAway === "away");
+    const hasScore = home?.score !== undefined && home?.score !== "" && away?.score !== undefined && away?.score !== "";
+    if (stType?.state === "post" && stType?.completed !== false && !isExtra && hasScore && home?.team?.id && away?.team?.id) {
+      const ts = new Date(ev.date).getTime();
+      if (Number.isFinite(ts)) {
+        targetMap.set(ev.id, {
+          id: ev.id, ts, date: ev.date, slug, compName, kind, flag,
+          hId: home.team.id, hName: home.team.displayName || "Casa", hScore: Number(home.score),
+          aId: away.team.id, aName: away.team.displayName || "Ospite", aScore: Number(away.score)
+        });
+      }
+    }
+  });
+}
+
+function buildQuarters(startD, endD) {
+  const quarters = [];
+  const startY = startD.getFullYear(), startQ = Math.floor(startD.getMonth() / 3);
+  const endY = endD.getFullYear(), endQ = Math.floor(endD.getMonth() / 3);
+  let y = startY, q = startQ;
+  while (y < endY || (y === endY && q <= endQ)) {
+    const mStart = q * 3 + 1;
+    const mEnd = mStart + 2;
+    const lastDay = String(new Date(y, mEnd, 0).getDate()).padStart(2, "0");
+    const qKey = `${y}Q${q + 1}`;
+    const range = `${y}${String(mStart).padStart(2, "0")}01-${y}${String(mEnd).padStart(2, "0")}${lastDay}`;
+    quarters.push({ y, q, mStart, mEnd, qKey, range });
+    q++;
+    if (q > 3) { q = 0; y++; }
+  }
+  return quarters;
+}
+
+window.scanSeason = async totalDays => {
+  if (isScanning) return;
+  scanAborted = false;
+  setScanBusy(true);
+  const wrapEl = document.getElementById("histScanWrap"), stEl = document.getElementById("histScanStatus");
+  const pWrap = document.getElementById("histProgressWrap"), pBar = document.getElementById("histProgressBar");
+  wrapEl.classList.remove("hidden"); pWrap.classList.remove("hidden"); pBar.style.width = "2%";
+
+  try {
+    stEl.textContent = "🔎 Verifico connessione verso ESPN API...";
+    try {
+      const probeRange = `${dateParam(-20)}-${dateParam(-1)}`;
+      await ESPNProvider.fetchScoreboard("eng.1", probeRange, 50, 0);
+    } catch (probeErr) {
+      const msg = probeErr?.status ? `HTTP ${probeErr.status}` : (probeErr?.message || "blocco rete/proxy/CORS");
+      stEl.textContent = `❌ Impossibile scaricare da ESPN (${msg}). Se sei su rete aziendale prova da connessione personale o attendi qualche minuto se ESPN ha limitato le richieste.`;
+      return;
+    }
+
+    const nowD = new Date(), currentQKey = `${nowD.getFullYear()}Q${Math.floor(nowD.getMonth() / 3) + 1}`;
+    const endD = new Date(); endD.setDate(endD.getDate() - 1); endD.setHours(23, 59, 59, 999);
+    const startD = new Date(); startD.setDate(startD.getDate() - totalDays); startD.setHours(0, 0, 0, 0);
+    const minTs = startD.getTime(), maxTs = endD.getTime();
+    const quarters = buildQuarters(startD, endD);
+
+    const evMap = new Map();
+    let reqOk = 0, reqErr = 0, lastErrStr = "";
+
+    for (let qIdx = 0; qIdx < quarters.length; qIdx++) {
+      if (scanAborted) break;
+      const { y, mStart, mEnd, qKey, range } = quarters[qIdx];
+      const qEndDay = new Date(y, mEnd, 0);
+      const isClosedQ = qKey < currentQKey && (nowD.getTime() - qEndDay.getTime()) > 3 * 86400000;
+
+      let qRecords = null;
+      if (isClosedQ) {
+        try { qRecords = await idbGet(Q_PREFIX + qKey); } catch {}
+      }
+
+      if (Array.isArray(qRecords)) {
+        stEl.textContent = `Cache trimestre ${qIdx + 1}/${quarters.length} (${qKey}) • ${evMap.size} match...`;
+      } else {
+        stEl.textContent = `Scarico trimestre ${qIdx + 1}/${quarters.length} (${qKey}) • ${evMap.size} match...`;
+        const qDedup = new Map();
+        let qHttpErr = 0;
+        await mapWithConcurrency(COMPS, 4, async ([slug, compName, kind, flag]) => {
+          if (scanAborted) return;
+          try {
+            const events = await ESPNProvider.fetchScoreboard(slug, range, 1000, 1);
+            reqOk++;
+            if (events.length >= 950) {
+              for (let m = mStart; m <= mEnd; m++) {
+                if (scanAborted) break;
+                const lastMDay = String(new Date(y, m, 0).getDate()).padStart(2, "0");
+                const mRange = `${y}${String(m).padStart(2, "0")}01-${y}${String(m).padStart(2, "0")}${lastMDay}`;
+                const mEvents = await ESPNProvider.fetchScoreboard(slug, mRange, 500, 1);
+                parseQuarterEvents(mEvents, slug, compName, kind, flag, qDedup);
+              }
+            } else {
+              parseQuarterEvents(events, slug, compName, kind, flag, qDedup);
+            }
+          } catch (err) {
+            reqErr++;
+            qHttpErr++;
+            lastErrStr = err?.status ? `HTTP ${err.status}` : (err?.message || "errore rete");
+            if (err?.status === 400) {
+              for (let m = mStart; m <= mEnd; m++) {
+                if (scanAborted) break;
+                try {
+                  const lastMDay = String(new Date(y, m, 0).getDate()).padStart(2, "0");
+                  const mRange = `${y}${String(m).padStart(2, "0")}01-${y}${String(m).padStart(2, "0")}${lastMDay}`;
+                  const mEvents = await ESPNProvider.fetchScoreboard(slug, mRange, 500, 0);
+                  reqOk++;
+                  parseQuarterEvents(mEvents, slug, compName, kind, flag, qDedup);
+                } catch {}
+              }
+            }
+          }
+        });
+        qRecords = Array.from(qDedup.values());
+        if (isClosedQ && !scanAborted && qRecords.length > 0 && qHttpErr === 0) {
+          try { await idbSet(Q_PREFIX + qKey, qRecords); } catch {}
+        }
+        await sleep(60);
+      }
+
+      qRecords.forEach(rec => {
+        if (rec.ts >= minTs && rec.ts <= maxTs && !evMap.has(rec.id)) evMap.set(rec.id, rec);
+      });
+      pBar.style.width = `${Math.round(((qIdx + 1) / (quarters.length + 1)) * 100)}%`;
+    }
+
+    if (evMap.size === 0) {
+      stEl.textContent = scanAborted
+        ? "⏹️ Scansione annullata (nessun dato salvato)."
+        : `⚠️ 0 match trovati (richieste OK: ${reqOk}, errori: ${reqErr}${lastErrStr ? ` • ${lastErrStr}` : ""}). Storico precedente mantenuto.`;
+      return;
+    }
+
+    const allEvents = Array.from(evMap.values()).sort((a, b) => a.ts - b.ts);
+    stEl.textContent = `Analizzo ${allEvents.length} match + calcolo rating ELO storico...`;
+    await sleep(20);
+
+    const rolling = {}, leagueRoll = {}, eloMap = {}, teams = {};
+    const initRoll = () => ({ played: 0, gf: 0, ga: 0, hP: 0, hGf: 0, hGa: 0, aP: 0, aGf: 0, aGa: 0, pts: [], res: [], lastTs: 0 });
+    const getRoll = id => rolling[id] || initRoll();
+    const getElo = (id, slug) => eloMap[id] ?? (LEAGUE_TIER[slug]?.elo ?? 1470);
+    const formFactor = arr => !arr.length ? 1.0 : 0.88 + (arr.slice(-5).reduce((a, b) => a + b, 0) / (Math.min(5, arr.length) * 3)) * 0.24;
+    const calcRollAdj = r => {
+      if (!r.res || r.res.length < 5) return { attFactor: 1.0, defFactor: 1.0 };
+      const sl = r.res.slice(-15);
+      let rGf = 0, rGa = 0, rEgf = 0, rEga = 0;
+      sl.forEach(x => { rGf += x.gf; rGa += x.ga; rEgf += x.egf; rEga += x.ega; });
+      return {
+        attFactor: clamp((rGf + 4.0) / Math.max(1.0, rEgf + 4.0), 0.90, 1.10),
+        defFactor: clamp((rGa + 4.0) / Math.max(1.0, rEga + 4.0), 0.90, 1.10)
+      };
+    };
+    const decayRoll = r => ({
+      played: r.played * 0.35, gf: r.gf * 0.35, ga: r.ga * 0.35,
+      hP: r.hP * 0.35, hGf: r.hGf * 0.35, hGa: r.hGa * 0.35,
+      aP: r.aP * 0.35, aGf: r.aGf * 0.35, aGa: r.aGa * 0.35,
+      pts: r.pts.slice(-2), res: [], lastTs: r.lastTs
+    });
+
+    allEvents.forEach(rec => {
+      const { hId, aId, hName, aName, hScore, aScore, ts: evTs, date, slug, compName, kind, flag } = rec;
+      if (!Number.isFinite(hScore) || !Number.isFinite(aScore)) return;
+
+      const lr = leagueRoll[slug] || { m: 0, hGf: 0, aGf: 0 };
+      const avgH = Number(clamp((lr.hGf + 1.48 * 10) / (lr.m + 10), 0.90, 2.30).toFixed(3));
+      const avgA = Number(clamp((lr.aGf + 1.18 * 10) / (lr.m + 10), 0.70, 2.00).toFixed(3));
+
+      let hr = getRoll(hId), ar = getRoll(aId);
+      const tierBase = LEAGUE_TIER[slug]?.elo ?? 1470;
+      if (hr.lastTs && (evTs - hr.lastTs) > 3888000000) {
+        hr = decayRoll(hr);
+        if (eloMap[hId] !== undefined) eloMap[hId] = eloMap[hId] * 0.78 + tierBase * 0.22;
+      }
+      if (ar.lastTs && (evTs - ar.lastTs) > 3888000000) {
+        ar = decayRoll(ar);
+        if (eloMap[aId] !== undefined) eloMap[aId] = eloMap[aId] * 0.78 + tierBase * 0.22;
+      }
+
+      const eloH = getElo(hId, slug), eloA = getElo(aId, slug);
+      let resH = hr.res, resA = ar.res;
+
+      if (hr.played >= 2 && ar.played >= 2) {
+        const rawHGF = hr.hP >= 3 ? (hr.hGf / hr.hP) : (hr.gf / hr.played) * 1.08;
+        const rawHGA = hr.hP >= 3 ? (hr.hGa / hr.hP) : (hr.ga / hr.played) * 0.92;
+        const rawAGF = ar.aP >= 3 ? (ar.aGf / ar.aP) : (ar.gf / ar.played) * 0.92;
+        const rawAGA = ar.aP >= 3 ? (ar.aGa / ar.aP) : (ar.ga / ar.played) * 1.08;
+
+        const fake = {
+          home: hName, away: aName, slug,
+          stats: {
+            avgH, avgA,
+            hGF: shrink(rawHGF, hr.hP >= 3 ? hr.hP : hr.played, avgH, 5),
+            hGA: shrink(rawHGA, hr.hP >= 3 ? hr.hP : hr.played, avgA, 5),
+            aGF: shrink(rawAGF, ar.aP >= 3 ? ar.aP : ar.played, avgA, 5),
+            aGA: shrink(rawAGA, ar.aP >= 3 ? ar.aP : ar.played, avgH, 5),
+            hFF: formFactor(hr.pts), aFF: formFactor(ar.pts), hL: 1.0, aL: 1.0,
+            adjH: calcRollAdj(hr), adjA: calcRollAdj(ar),
+            isCrossLeague: kind !== "Campionato", eloH, eloA,
+            comp: hr.played >= 5 && ar.played >= 5 ? 0.91 : 0.74, vol: 0.22
+          }
+        };
+        const pred = calcPred(fake, {}, true);
+        const lH = Number(pred.lamH), lA = Number(pred.lamA);
+        resH = [...hr.res.slice(-14), { gf: hScore, ga: aScore, egf: lH, ega: lA }];
+        resA = [...ar.res.slice(-14), { gf: aScore, ga: hScore, egf: lA, ega: lH }];
+
+        const ph = isHit(pred.bestPick.code, hScore, aScore) ? 1 : 0;
+        const oh = isHit(pred.ouPick.code, hScore, aScore) ? 1 : 0;
+        const pr = Number(pred.bestPick.prob.toFixed(3)), cat = pred.bestPick.cat;
+        const b1x2 = Number((
+          Math.pow(pred.probs.p1 - (hScore > aScore ? 1 : 0), 2) +
+          Math.pow(pred.probs.px - (hScore === aScore ? 1 : 0), 2) +
+          Math.pow(pred.probs.p2 - (hScore < aScore ? 1 : 0), 2)
+        ).toFixed(4));
+        const bOu = Number(Math.pow(pred.probs.pO - ((hScore + aScore) >= 3 ? 1 : 0), 2).toFixed(4));
+
+        const pushRec = (tid, tName, oppId, opp, isHome) => {
+          if (!teams[tid]) teams[tid] = { id: tid, n: tName, elo: 1500, tot: 0, hit: 0, ou: 0, tTot: 0, tHit: 0, eg: 0, rg: 0, gf: 0, ga: 0, egf: 0, ega: 0, m: [] };
+          const t = teams[tid];
+          t.n = tName;
+          const myGf = isHome ? hScore : aScore, myGa = isHome ? aScore : hScore;
+          const myEgf = isHome ? lH : lA, myEga = isHome ? lA : lH;
+          t.tot++; t.hit += ph; t.ou += oh;
+          if (pred.confidence >= 75) { t.tTot++; t.tHit += ph; }
+          t.eg += lH + lA; t.rg += hScore + aScore;
+          t.gf += myGf; t.ga += myGa; t.egf += myEgf; t.ega += myEga;
+          t.m.push({
+            d: date.slice(0, 10), c: compName, k: kind, f: flag, oid: oppId, h: isHome ? 1 : 0,
+            t: isHome ? `${tName} - ${opp}` : `${opp} - ${tName}`, s: `${hScore}-${aScore}`,
+            p: pred.bestPick.code, cat, pr, ph, o: pred.ouPick.code, oh,
+            b1x2, bOu, gf: myGf, ga: myGa, egf: myEgf, ega: myEga
+          });
+        };
+        pushRec(hId, hName, aId, aName, true);
+        pushRec(aId, aName, hId, hName, false);
+      }
+
+      const expH = 1 / (1 + Math.pow(10, (eloA - (eloH + 55)) / 400));
+      const actH = hScore > aScore ? 1 : hScore === aScore ? 0.5 : 0;
+      const kElo = (kind === "Coppa" ? 26 : 20) * Math.max(1, Math.log(Math.abs(hScore - aScore) + 1) * 1.15);
+      eloMap[hId] = eloH + kElo * (actH - expH);
+      eloMap[aId] = eloA + kElo * ((1 - actH) - (1 - expH));
+
+      leagueRoll[slug] = { m: lr.m + 1, hGf: lr.hGf + hScore, aGf: lr.aGf + aScore };
+      const hp = hScore > aScore ? 3 : hScore === aScore ? 1 : 0;
+      const ap = aScore > hScore ? 3 : aScore === hScore ? 1 : 0;
+      rolling[hId] = { ...hr, played: hr.played + 1, gf: hr.gf + hScore, ga: hr.ga + aScore, hP: hr.hP + 1, hGf: hr.hGf + hScore, hGa: hr.hGa + aScore, pts: [...hr.pts, hp], res: resH, lastTs: evTs };
+      rolling[aId] = { ...ar, played: ar.played + 1, gf: ar.gf + aScore, ga: ar.ga + hScore, aP: ar.aP + 1, aGf: ar.aGf + aScore, aGa: ar.aGa + hScore, pts: [...ar.pts, ap], res: resA, lastTs: evTs };
+    });
+
+    Object.keys(teams).forEach(tid => { teams[tid].elo = Math.round(eloMap[tid] ?? 1500); });
+    await saveTeamHist(teams);
+    pBar.style.width = "100%";
+    stEl.textContent = `${scanAborted ? "⏹️ Parziale:" : "✅ Salvati"} ${allEvents.length.toLocaleString("it-IT")} match + ELO su ${Object.keys(teams).length} squadre!`;
+    recalcAllPredictions();
+    renderTeamLeaderboard();
+    renderSchedule();
+  } catch (err) {
+    console.error("Errore scanSeason:", err);
+    stEl.textContent = "⚠️ Errore durante lo scaricamento. Riprova.";
+  } finally {
+    setScanBusy(false);
+    setTimeout(() => pWrap.classList.add("hidden"), 1200);
   }
 };
 
-const FACT = [1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800];
-const pois = (k, l) => (Math.pow(l, k) * Math.exp(-l)) / FACT[k];
-const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
-const safeNum = (v, fb) => Number.isFinite(v) ? v : fb;
-const shrink = (val, gp, leagueAvg, priorWeight = 5) => (val * gp + leagueAvg * priorWeight) / (gp + priorWeight);
-const damp = (f, power = 0.5) => Math.pow(clamp(safeNum(f, 1.0), 0.5, 1.8), power);
-const fairOdd = p => (1 / Math.max(0.02, p)).toFixed(2);
-const PICK_BASELINES = { "1": 0.44, "2": 0.29, "X": 0.27, "1X": 0.72, "X2": 0.56, "Over 2.5": 0.50, "Under 2.5": 0.50, "Gol": 0.50, "No Gol": 0.50 };
-const pickEdge = (code, prob) => { const b = PICK_BASELINES[code] ?? 0.50; return Math.max(0, (prob - b) / (1 - b)); };
+window.resetHistory = async () => {
+  if (isScanning) return;
+  await clearTeamHist();
+  document.getElementById("histScanWrap").classList.add("hidden");
+  recalcAllPredictions(); renderTeamLeaderboard(); renderSchedule();
+};
 
-function isHit(code, h, a) {
-  const tot = h + a;
-  if (code === "1") return h > a;
-  if (code === "X") return h === a;
-  if (code === "2") return h < a;
-  if (code === "1X") return h >= a;
-  if (code === "X2") return h <= a;
-  if (code === "Over 1.5") return tot >= 2;
-  if (code === "Over 2.5") return tot >= 3;
-  if (code === "Under 2.5") return tot <= 2;
-  if (code === "Gol") return h > 0 && a > 0;
-  if (code === "No Gol") return h === 0 || a === 0;
-  if (code === "1X + Over 1.5") return h >= a && tot >= 2;
-  if (code === "X2 + Over 1.5") return a >= h && tot >= 2;
-  if (code === "1X + Under 3.5") return h >= a && tot <= 3;
-  if (code === "X2 + Under 3.5") return a >= h && tot <= 3;
-  if (code === "Multigol 1-3") return tot >= 1 && tot <= 3;
-  if (code === "Multigol 2-4") return tot >= 2 && tot <= 4;
-  if (code === "Gol Casa") return h >= 1;
-  if (code === "Gol Ospite") return a >= 1;
-  return false;
-}
-
-function getTeamAdj(teamId) {
-  const th = getTeamHist()[teamId];
-  if (!th) return { attFactor: 1.0, defFactor: 1.0, elo: null };
-  const elo = Number.isFinite(th.elo) ? th.elo : null;
-  if (th.tot < 5) return { attFactor: 1.0, defFactor: 1.0, elo };
-
-  const recent = Array.isArray(th.m) ? th.m.slice(-15) : [];
-  const lastDate = recent.length ? Date.parse(recent[recent.length - 1].d) : 0;
-  if (lastDate && (Date.now() - lastDate) > 45 * 86400000) {
-    return { attFactor: 1.0, defFactor: 1.0, elo };
-  }
-
-  const hasDetailed = recent.length >= 5 && recent.every(x => Number.isFinite(x.gf) && Number.isFinite(x.egf));
-  let attFactor = 1.0, defFactor = 1.0;
-  if (hasDetailed) {
-    let rGf = 0, rGa = 0, rEgf = 0, rEga = 0;
-    recent.forEach(x => { rGf += x.gf; rGa += x.ga; rEgf += x.egf; rEga += x.ega; });
-    attFactor = clamp((rGf + 4.0) / Math.max(1.0, rEgf + 4.0), 0.90, 1.10);
-    defFactor = clamp((rGa + 4.0) / Math.max(1.0, rEga + 4.0), 0.90, 1.10);
-  } else if (th.egf > 0 && th.ega > 0) {
-    attFactor = clamp((th.gf + 5.0) / Math.max(1.0, th.egf + 5.0), 0.90, 1.10);
-    defFactor = clamp((th.ga + 5.0) / Math.max(1.0, th.ega + 5.0), 0.90, 1.10);
-  }
-  return {
-    attFactor: Number(safeNum(attFactor, 1.0).toFixed(3)),
-    defFactor: Number(safeNum(defFactor, 1.0).toFixed(3)),
-    elo
-  };
-}
-
-function calcPred(m, ov = {}, useCal = true) {
-  const hL = safeNum(ov.hL ?? m.stats.hL, 1.0), aL = safeNum(ov.aL ?? m.stats.aL, 1.0);
-  const neutralAdj = { attFactor: 1.0, defFactor: 1.0, elo: null };
-  const adjH = (useCal && st.autoCal) ? (m.stats.adjH ?? (m.homeId ? getTeamAdj(m.homeId) : neutralAdj)) : neutralAdj;
-  const adjA = (useCal && st.autoCal) ? (m.stats.adjA ?? (m.awayId ? getTeamAdj(m.awayId) : neutralAdj)) : neutralAdj;
-  const avgH = safeNum(m.stats.avgH, 1.48), avgA = safeNum(m.stats.avgA, 1.18);
-  const hGF = safeNum(m.stats.hGF, avgH), hGA = safeNum(m.stats.hGA, avgA);
-  const aGF = safeNum(m.stats.aGF, avgA), aGA = safeNum(m.stats.aGA, avgH);
-  const hFF = safeNum(m.stats.hFF, 1.0), aFF = safeNum(m.stats.aFF, 1.0);
-
-  let eloMult = 1.0;
-  if (useCal && st.autoCal) {
-    const eloH = safeNum(m.stats.eloH, adjH.elo);
-    const eloA = safeNum(m.stats.eloA, adjA.elo);
-    if (Number.isFinite(eloH) || Number.isFinite(eloA)) {
-      const defEloH = LEAGUE_TIER[m.stats.domSlugH || m.slug]?.elo ?? 1470;
-      const defEloA = LEAGUE_TIER[m.stats.domSlugA || m.slug]?.elo ?? 1470;
-      const effEloH = Number.isFinite(eloH) ? eloH : defEloH;
-      const effEloA = Number.isFinite(eloA) ? eloA : defEloA;
-      const wt = m.stats.isCrossLeague ? 0.18 : 0.06;
-      eloMult = clamp(Math.pow(10, ((effEloH - effEloA) / 400) * wt), 0.78, 1.28);
-    } else if (m.stats.isCrossLeague && m.stats.tierH && m.stats.tierA) {
-      eloMult = clamp(Math.pow(m.stats.tierH / m.stats.tierA, 1.2), 0.84, 1.19);
-    }
-  }
-
-  const lamH = Math.max(0.25, (hGF / avgH) * (aGA / avgH) * avgH * damp(hFF, 0.5) * hL * damp(adjH.attFactor, 0.5) * damp(adjA.defFactor, 0.5) * eloMult);
-  const lamA = Math.max(0.25, (aGF / avgA) * (hGA / avgA) * avgA * damp(aFF, 0.5) * aL * damp(adjA.attFactor, 0.5) * damp(adjH.defFactor, 0.5) / eloMult);
-
-  const rho = -0.08, scores = [];
-  let totalP = 0;
-  for (let i = 0; i <= 10; i++) {
-    const pi = pois(i, lamH);
-    for (let j = 0; j <= 10; j++) {
-      let p = pi * pois(j, lamA);
-      if (i === 0 && j === 0) p *= Math.max(0.05, 1 - lamH * lamA * rho);
-      else if (i === 1 && j === 0) p *= Math.max(0.05, 1 + lamA * rho);
-      else if (i === 0 && j === 1) p *= Math.max(0.05, 1 + lamH * rho);
-      else if (i === 1 && j === 1) p *= Math.max(0.05, 1 - rho);
-      scores.push({ i, j, p });
-      totalP += p;
-    }
-  }
-
-  let p1 = 0, px = 0, p2 = 0, pO = 0, pG = 0;
-  let pO15 = 0, p1X_O15 = 0, pX2_O15 = 0, p1X_U35 = 0, pX2_U35 = 0, pMG13 = 0, pMG24 = 0, pHomeG = 0, pAwayG = 0;
-  const invTotal = totalP > 0 ? 1 / totalP : 1;
-  for (let k = 0; k < scores.length; k++) {
-    const s = scores[k];
-    s.p *= invTotal;
-    const tot = s.i + s.j;
-    if (s.i > s.j) p1 += s.p; else if (s.i === s.j) px += s.p; else p2 += s.p;
-    if (tot > 2) pO += s.p;
-    if (s.i > 0 && s.j > 0) pG += s.p;
-    if (tot >= 2) pO15 += s.p;
-    if (s.i >= s.j && tot >= 2) p1X_O15 += s.p;
-    if (s.j >= s.i && tot >= 2) pX2_O15 += s.p;
-    if (s.i >= s.j && tot <= 3) p1X_U35 += s.p;
-    if (s.j >= s.i && tot <= 3) pX2_U35 += s.p;
-    if (tot >= 1 && tot <= 3) pMG13 += s.p;
-    if (tot >= 2 && tot <= 4) pMG24 += s.p;
-    if (s.i >= 1) pHomeG += s.p;
-    if (s.j >= 1) pAwayG += s.p;
-  }
-
-  const topScores = scores.sort((a, b) => b.p - a.p).slice(0, 3).map(s => ({ score: `${s.i}-${s.j}`, prob: s.p }));
-  const best1X2 = [
-    { code: "1", cat: "1X2", label: "Vittoria " + m.home, prob: p1 },
-    { code: "2", cat: "1X2", label: "Vittoria " + m.away, prob: p2 },
-    { code: "X", cat: "1X2", label: "Pareggio", prob: px }
-  ].reduce((b, c) => c.prob > b.prob ? c : b);
-
-  const bestDC = p1 >= p2
-    ? { code: "1X", cat: "DC", label: m.home + " o X", prob: p1 + px }
-    : { code: "X2", cat: "DC", label: m.away + " o X", prob: px + p2 };
-
-  const bestGoals = [
-    { code: "Over 2.5", cat: "GOALS", label: "3+ Gol", prob: pO },
-    { code: "Under 2.5", cat: "GOALS", label: "0-2 Gol", prob: 1 - pO },
-    { code: "Gol", cat: "GOALS", label: "Entrambe a segno", prob: pG },
-    { code: "No Gol", cat: "GOALS", label: "Almeno una a zero", prob: 1 - pG }
-  ].reduce((b, c) => c.prob > b.prob ? c : b);
-
-  const e1X2 = pickEdge(best1X2.code, best1X2.prob);
-  const eDC = pickEdge(bestDC.code, bestDC.prob);
-  const eGoals = pickEdge(bestGoals.code, bestGoals.prob);
-
-  let bestPick;
-  if (best1X2.prob >= 0.58) {
-    bestPick = (bestGoals.prob >= 0.67 && eGoals > e1X2 * 1.05) ? bestGoals : best1X2;
-  } else {
-    bestPick = (eGoals >= eDC * 0.90) ? bestGoals : bestDC;
-  }
-
-  const ouPick = pO >= 0.5 ? { code: "Over 2.5", prob: pO, isOver: true } : { code: "Under 2.5", prob: 1 - pO, isOver: false };
-  const edge = pickEdge(bestPick.code, bestPick.prob);
-  const sig = clamp(0.38 + edge * 0.95, 0.25, 1);
-  const baseConf = (sig * 0.48 + m.stats.comp * 0.28 + (1 - m.stats.vol) * 0.24) * 100;
-  const conf = Math.min(94, Math.max(35, Math.round(baseConf)));
-  const rankScore = (sig * 100) * 0.55 + conf * 0.45;
-
-  const combos = [
-    { code: p1 >= p2 ? "1X + Over 1.5" : "X2 + Over 1.5", prob: p1 >= p2 ? p1X_O15 : pX2_O15 },
-    { code: p1 >= p2 ? "1X + Under 3.5" : "X2 + Under 3.5", prob: p1 >= p2 ? p1X_U35 : pX2_U35 },
-    { code: "Over 1.5", prob: pO15 },
-    { code: "Multigol 1-3", prob: pMG13 },
-    { code: "Multigol 2-4", prob: pMG24 },
-    { code: "Gol Casa", prob: pHomeG },
-    { code: "Gol Ospite", prob: pAwayG }
-  ];
-
-  return {
-    lamH: lamH.toFixed(2), lamA: lamA.toFixed(2),
-    probs: { p1, px, p2, pO, pU: 1 - pO, pG, pNG: 1 - pG },
-    bestPick, best1X2, ouPick, topScores, combos, confidence: conf, rankScore
-  };
-}
-
-function parseForm(str) {
-  if (!str) return { pills: [], factor: 1.0 };
-  const map = { W: "V", D: "P", L: "S", T: "P" }, ptsMap = { W: 3, D: 1, T: 1, L: 0 };
-  const arr = str.slice(-5).split("");
-  const pts = arr.reduce((s, c) => s + (ptsMap[c] ?? 1), 0);
-  return { pills: arr.map(c => map[c] || c), factor: Number((0.88 + (pts / Math.max(1, arr.length * 3)) * 0.24).toFixed(3)) };
-}
-
-function renderFormDots(pills) {
-  if (!pills || !pills.length) return "";
-  return `<span class="inline-flex items-center gap-0.5 ml-1.5 shrink-0">${pills.map(p => {
-    const cls = p === "V" ? "bg-emerald-400" : p === "P" ? "bg-amber-400" : "bg-rose-400";
-    return `<span class="w-1.5 h-1.5 rounded-full ${cls}" title="${esc(p)}"></span>`;
-  }).join("")}</span>`;
-}
-
-function renderFormBadges(pills) {
-  if (!pills || !pills.length) return `<span class="text-slate-500">N/D</span>`;
-  return pills.map(p => {
-    const cls = p === "V" ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-      : p === "P" ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-      : "bg-rose-500/20 text-rose-300 border-rose-500/40";
-    return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold border ${cls}">${esc(p)}</span>`;
-  }).join(" ");
-}
-
-function extractStandingsEntries(node) {
-  if (!node) return [];
-  let entries = node.standings?.entries || [];
-  if (Array.isArray(node.children)) {
-    node.children.forEach(c => { entries = entries.concat(extractStandingsEntries(c)); });
-  }
-  return entries;
-}
-
-const splitAvg = (val, gp) => (Number.isFinite(val) && Number.isFinite(gp) && gp >= 3) ? val / gp : null;
-
-async function fetchStandings(slug, leagueName = "") {
-  const cached = standingsCache[slug];
-  if (cached && (Date.now() - cached.ts) < STANDINGS_TTL) return cached.map;
-  try {
-    const d = await ESPNProvider.fetchStandingsRaw(slug);
-    if (!d) return {};
-    const entries = extractStandingsEntries(d);
-    const map = {};
-    let sumGf = 0, sumGp = 0, sumHGf = 0, sumHGp = 0, sumAGf = 0, sumAGp = 0;
-
-    entries.forEach(e => {
-      const m = {}; (e.stats || []).forEach(s => { m[s.name] = Number(s.value); });
-      const gp = m.gamesPlayed || 0, gf = m.pointsFor ?? m.goalsFor ?? 0, ga = m.pointsAgainst ?? m.goalsAgainst ?? 0;
-      if (e.team?.id && gp > 0 && Number.isFinite(gf) && Number.isFinite(ga)) {
-        sumGf += gf; sumGp += gp;
-        const hGf = m.homeGoalsFor ?? m.homePointsFor, hGp = m.homeGamesPlayed;
-        const aGf = m.awayGoalsFor ?? m.awayPointsFor, aGp = m.awayGamesPlayed;
-        if (Number.isFinite(hGf) && Number.isFinite(hGp) && hGp > 0) { sumHGf += hGf; sumHGp += hGp; }
-        if (Number.isFinite(aGf) && Number.isFinite(aGp) && aGp > 0) { sumAGf += aGf; sumAGp += aGp; }
-
-        const obj = {
-          played: gp, gfAvg: gf / gp, gaAvg: ga / gp,
-          hGp: (Number.isFinite(hGp) && hGp >= 3) ? hGp : null,
-          aGp: (Number.isFinite(aGp) && aGp >= 3) ? aGp : null,
-          hGfAvg: splitAvg(hGf, hGp), hGaAvg: splitAvg(m.homeGoalsAgainst ?? m.homePointsAgainst, hGp),
-          aGfAvg: splitAvg(aGf, aGp), aGaAvg: splitAvg(m.awayGoalsAgainst ?? m.awayPointsAgainst, aGp),
-          rank: Number.isFinite(m.rank) ? m.rank : "-", source: leagueName || slug, domSlug: slug
-        };
-        map[e.team.id] = obj;
-        if (!GLOBAL_TEAM_STATS[e.team.id] || gp > GLOBAL_TEAM_STATS[e.team.id].played) {
-          GLOBAL_TEAM_STATS[e.team.id] = obj;
-        }
-      }
-    });
-
-    let avgH = 1.48, avgA = 1.18;
-    if (sumHGp >= 20 && sumAGp >= 20) {
-      avgH = Number(clamp(sumHGf / sumHGp, 0.90, 2.30).toFixed(3));
-      avgA = Number(clamp(sumAGf / sumAGp, 0.70, 2.00).toFixed(3));
-    } else if (sumGp >= 20) {
-      const avgG = sumGf / sumGp;
-      avgH = Number(clamp(avgG * 1.08, 0.90, 2.30).toFixed(3));
-      avgA = Number(clamp(avgG * 0.92, 0.70, 2.00).toFixed(3));
-    }
-
-    standingsCache[slug] = { ts: Date.now(), map, avgH, avgA };
-    return map;
-  } catch { return {}; }
-}
-
-function resolveTeamStats(teamId, localTable, kind = "Campionato") {
-  const isLeague = kind === "Campionato", isClubCup = kind === "Coppa";
-  const local = localTable[teamId], dom = GLOBAL_TEAM_STATS[teamId];
-  if (isLeague && local && local.played >= 3) return { ...local, kind: "local" };
-  if (isClubCup && dom && dom.played >= 6 && (!local || dom.played >= local.played)) return { ...dom, kind: "league" };
-  if (local && local.played >= 3) return { ...local, kind: "local" };
-  if (isClubCup && dom && dom.played >= 3) return { ...dom, kind: "league" };
-
-  const th = getTeamHist()[teamId];
-  if (th && th.tot >= 4) {
-    const rec = Array.isArray(th.m) ? th.m.slice(-38).filter(x => Number.isFinite(x.gf) && Number.isFinite(x.ga)) : [];
-    if (rec.length >= 4) {
-      let rGf = 0, rGa = 0;
-      rec.forEach(x => { rGf += x.gf; rGa += x.ga; });
-      return { played: rec.length, gfAvg: rGf / rec.length, gaAvg: rGa / rec.length, kind: "hist", source: `Storico (${rec.length}g)` };
-    }
-    if (Number.isFinite(th.gf) && Number.isFinite(th.ga)) {
-      return { played: th.tot, gfAvg: th.gf / th.tot, gaAvg: th.ga / th.tot, kind: "hist", source: "Storico" };
-    }
-  }
-  if (local && local.played > 0) return { ...local, kind: "local" };
-  return null;
-}
-
-function dateParam(offset) {
-  const d = new Date(); d.setDate(d.getDate() + offset);
-  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function localDateKey(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function targetDateKey(offset) {
-  const d = new Date(); d.setDate(d.getDate() + offset);
-  return localDateKey(d);
-}
-
-function renderTeamLeaderboard() {
-  const raw = getTeamHist(), q = document.getElementById("teamHistSearch").value.trim().toLowerCase();
-  const minM = Number(document.getElementById("minMatchesFilter").value), all = Object.values(raw);
-  const tot = all.reduce((s, x) => s + x.tot, 0), hits = all.reduce((s, x) => s + x.hit, 0), ouHits = all.reduce((s, x) => s + x.ou, 0);
-
-  let uniqueM = 0, brierSum = 0, b1x2Sum = 0, b1x2Cnt = 0, bOuSum = 0, bOuCnt = 0;
-  const byCat = { "1X2": { n: 0, h: 0 }, "DC": { n: 0, h: 0 }, "GOALS": { n: 0, h: 0 } };
-  const bins = [
-    { label: "50–60%", min: 0.50, max: 0.60, n: 0, h: 0, pSum: 0 },
-    { label: "60–70%", min: 0.60, max: 0.70, n: 0, h: 0, pSum: 0 },
-    { label: "70–80%", min: 0.70, max: 0.80, n: 0, h: 0, pSum: 0 },
-    { label: "80%+", min: 0.80, max: 1.01, n: 0, h: 0, pSum: 0 }
-  ];
-
-  all.forEach(t => {
-    (t.m || []).forEach(x => {
-      if (x.h !== 1 || !Number.isFinite(x.pr)) return;
-      uniqueM++; brierSum += Math.pow(x.pr - x.ph, 2);
-      if (Number.isFinite(x.b1x2)) { b1x2Sum += x.b1x2; b1x2Cnt++; }
-      if (Number.isFinite(x.bOu)) { bOuSum += x.bOu; bOuCnt++; }
-      if (byCat[x.cat]) { byCat[x.cat].n++; byCat[x.cat].h += x.ph; }
-      const b = bins.find(bn => x.pr >= bn.min && x.pr < bn.max);
-      if (b) { b.n++; b.h += x.ph; b.pSum += x.pr; }
-    });
-  });
-
-  document.getElementById("hTotal").textContent = (uniqueM || Math.round(tot / 2)).toLocaleString("it-IT");
-  document.getElementById("hWinRate").textContent = tot ? `${Math.round(hits / tot * 100)}%` : "-";
-  document.getElementById("hBrier").textContent = uniqueM ? (brierSum / uniqueM).toFixed(3) : "-";
-  document.getElementById("hOuRate").textContent = tot ? `${Math.round(ouHits / tot * 100)}%` : "-";
-
-  const calBox = document.getElementById("calibSummary");
-  if (uniqueM > 0) {
-    calBox.classList.remove("hidden");
-    const fmtCat = (label, obj) => obj.n ? `<span class="px-2 py-0.5 rounded bg-slate-900 border border-slate-800">${label}: <strong class="text-white">${Math.round(obj.h / obj.n * 100)}%</strong> <span class="text-slate-500">(${obj.n.toLocaleString("it-IT")})</span></span>` : "";
-    const marketBriers = (b1x2Cnt || bOuCnt)
-      ? `<div class="flex flex-wrap gap-2 text-[10px] text-slate-400 pt-1 border-t border-slate-800/80">
-          ${b1x2Cnt ? `<span title="3-esiti (casuale = 0.667, buono < 0.60)">Brier 1X2: <strong class="text-cyan-300">${(b1x2Sum / b1x2Cnt).toFixed(3)}</strong></span>` : ""}
-          ${bOuCnt ? `<span title="Binario (casuale = 0.250, buono < 0.240)">Brier O/U 2.5: <strong class="text-fuchsia-300">${(bOuSum / bOuCnt).toFixed(3)}</strong></span>` : ""}
-        </div>` : "";
-    calBox.innerHTML = `
-      <div class="flex flex-wrap items-center justify-between gap-1.5">
-        <span class="font-bold text-slate-300">🎯 Resa per Mercato:</span>
-        <div class="flex flex-wrap gap-1.5">${fmtCat("1X2", byCat["1X2"])}${fmtCat("Doppia Chance", byCat["DC"])}${fmtCat("Gol/O-U", byCat["GOALS"])}</div>
-      </div>
-      <div class="grid grid-cols-4 gap-1.5 pt-1 border-t border-slate-800/80 text-center">
-        ${bins.map(b => {
-          const real = b.n ? Math.round((b.h / b.n) * 100) + "%" : "-";
-          const exp = b.n ? Math.round((b.pSum / b.n) * 100) + "%" : "-";
-          return `<div class="p-1.5 rounded-lg bg-slate-900/70"><div class="text-[9px] text-slate-400">Prev. ${b.label}</div><div class="font-bold text-emerald-400">${real} <span class="text-[9px] text-slate-500 font-normal">vs ${exp}</span></div></div>`;
-        }).join("")}
-      </div>${marketBriers}`;
-  } else {
-    calBox.classList.add("hidden");
-  }
-
-  const list = all.filter(t => t.tot >= minM && (!q || t.n.toLowerCase().includes(q)))
-    .map(t => ({ ...t, rate: t.hit / t.tot })).sort((a, b) => b.rate - a.rate || b.tot - a.tot);
-
-  const box = document.getElementById("teamLeaderboard");
-  if (!all.length) {
-    box.innerHTML = `<div class="glass rounded-2xl p-6 text-center text-xs text-slate-400">Premi <strong>"📥 1 Anno"</strong>, <strong>"📥 5 Anni"</strong> o <strong>"📥 10 Anni"</strong> per generare storico, rating ELO e calibrazione reale!</div>`;
-    return;
-  }
-  if (!list.length) {
-    box.innerHTML = `<div class="glass rounded-2xl p-6 text-center text-xs text-slate-400">Nessuna squadra trovata.</div>`;
-    return;
-  }
-
-  box.innerHTML = list.slice(0, 250).map((t, idx) => {
-    const pct = Math.round(t.rate * 100), ouPct = Math.round((t.ou / t.tot) * 100);
-    const cls = pct >= 68 ? "border-emerald-500/35 text-emerald-400" : pct >= 52 ? "border-amber-500/35 text-amber-300" : "border-rose-500/35 text-rose-400";
-    const barCls = pct >= 68 ? "bg-emerald-500" : pct >= 52 ? "bg-amber-400" : "bg-rose-500";
-    return `<div data-tid="${esc(t.id)}" class="team-card glass rounded-2xl p-3 space-y-2 border ${cls.split(' ')[0]} cursor-pointer hover:bg-slate-800/50 transition-colors">
-      <div class="flex items-center justify-between gap-2">
-        <div class="flex items-center gap-2 min-w-0">
-          <span class="text-xs font-bold text-slate-500 w-7 shrink-0">#${idx + 1}</span>
-          <div class="min-w-0">
-            <div class="text-xs sm:text-sm font-bold text-white truncate">${esc(t.n)} <span class="text-[10px] font-normal text-cyan-300">ELO ${Math.round(t.elo || 1500)}</span></div>
-            <div class="text-[10px] text-slate-400">${t.hit}/${t.tot} presi • O/U ${ouPct}%</div>
-          </div>
-        </div>
-        <div class="flex items-center gap-2 shrink-0"><span class="text-sm font-extrabold ${cls.split(' ')[1]}">${pct}%</span><span class="text-slate-500 text-xs">▸</span></div>
-      </div>
-      <div class="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden"><div class="h-full ${barCls}" style="width:${pct}%"></div></div>
-    </div>`;
-  }).join("");
-}
-
-function openTeamModal(tid) {
-  const t = getTeamHist()[tid];
-  if (!t) return;
-  currentModalToken++;
-  const pct = Math.round((t.hit / t.tot) * 100);
-  document.getElementById("modalLeague").textContent = `Storico • ${t.hit}/${t.tot} presi (${pct}%) • ELO ${Math.round(t.elo || 1500)}`;
-  document.getElementById("modalTitle").textContent = t.n;
-  const byCompYear = {};
-  t.m.slice().reverse().forEach(x => {
-    const yr = (x.d || "").slice(0, 4);
-    const key = `${yr} • ${x.f} ${x.c} (${x.k})`;
-    if (!byCompYear[key]) byCompYear[key] = [];
-    byCompYear[key].push(x);
-  });
-  document.getElementById("modalBody").innerHTML = Object.entries(byCompYear).map(([label, list], i) => {
-    const cHits = list.filter(x => x.ph).length;
-    return `<details ${i < 3 ? "open" : ""} class="rounded-xl bg-slate-950 border border-slate-800 overflow-hidden">
-      <summary class="px-3 py-2 bg-slate-900 border-b border-slate-800 flex justify-between items-center cursor-pointer list-none">
-        <span class="text-xs font-bold text-white">${esc(label)}</span>
-        <span class="text-[11px] font-semibold text-emerald-400">${cHits}/${list.length} (${Math.round(cHits / list.length * 100)}%) ▾</span>
-      </summary>
-      <div class="divide-y divide-slate-800/70">
-        ${list.map(x => `<div class="px-3 py-2 flex items-center justify-between gap-2 text-xs">
-          <div class="min-w-0"><div class="text-[10px] text-slate-500">${esc(x.d)}</div><div class="text-slate-200 font-medium truncate">${esc(x.t)}</div></div>
-          <div class="flex items-center gap-2 shrink-0">
-            <span class="px-2 py-0.5 rounded bg-slate-800 font-bold text-white">${esc(x.s)}</span>
-            <div class="text-right">
-              <div class="text-[11px] font-bold ${x.ph ? 'text-emerald-400' : 'text-rose-400'}">${esc(x.p)} ${x.ph ? '✅' : '❌'}</div>
-              <div class="text-[9px] text-slate-400">${esc(x.o)} ${x.oh ? '✅' : '❌'}</div>
-            </div>
-          </div>
-        </div>`).join("")}
-      </div>
-    </details>`;
-  }).join("");
-  document.body.classList.add("overflow-hidden");
-  const mod = document.getElementById("detailModal");
-  mod.classList.remove("hidden"); mod.classList.add("flex");
-}
-
-function renderDiario() {
-  const closed = BET_LOG.filter(b => b.status === "won" || b.status === "lost");
-  const won = closed.filter(b => b.status === "won").length;
-  const staked = closed.reduce((s, b) => s + b.stake, 0);
-  const net = closed.reduce((s, b) => s + (b.status === "won" ? b.stake * (b.odd - 1) : -b.stake), 0);
-
-  document.getElementById("dCount").textContent = `${closed.length}/${BET_LOG.length}`;
-  document.getElementById("dWinRate").textContent = closed.length ? `${Math.round(won / closed.length * 100)}%` : "-";
-  const netEl = document.getElementById("dNetProfit");
-  netEl.textContent = `${net >= 0 ? "+" : ""}${net.toFixed(2)}u`;
-  netEl.className = `text-sm font-extrabold ${net >= 0 ? "text-emerald-400" : "text-rose-400"}`;
-  document.getElementById("dRoi").textContent = staked > 0 ? `${((net / staked) * 100).toFixed(1)}%` : "-";
-
-  const box = document.getElementById("betLogList");
-  if (!BET_LOG.length) {
-    box.innerHTML = `<div class="glass rounded-2xl p-6 text-center text-xs text-slate-400">Nessuna giocata registrata. Tocca una partita nel palinsesto, inserisci la quota e premi <strong>"💼 Registra"</strong>!</div>`;
-    return;
-  }
-
-  box.innerHTML = BET_LOG.slice().reverse().map(b => {
-    const netWon = b.stake * (b.odd - 1);
-    const stBadge = b.status === "won"
-      ? (netWon >= 0
-          ? `<span class="text-emerald-400 font-bold">✅ VINTA (+${netWon.toFixed(2)}u)</span>`
-          : `<span class="text-amber-300 font-bold">🟡 PARZIALE (${netWon.toFixed(2)}u)</span>`)
-      : b.status === "lost" ? `<span class="text-rose-400 font-bold">❌ PERSA (-${b.stake.toFixed(2)}u)</span>`
-      : b.status === "void" ? `<span class="text-slate-400 font-bold">↩️ RIMBORSATA</span>`
-      : `<span class="text-amber-300 font-bold">⏳ IN ATTESA</span>`;
-    return `<div class="glass rounded-2xl p-3 space-y-2 text-xs">
-      <div class="flex justify-between items-start gap-2">
-        <div class="min-w-0">
-          <div class="text-[10px] text-slate-400">${esc(b.date)} • ${esc(b.league)}</div>
-          <div class="font-bold text-white truncate">${esc(b.match)}</div>
-          <div class="text-[11px] text-cyan-300 font-semibold">${esc(b.code)} @${b.odd.toFixed(2)} • Puntata: ${b.stake}u</div>
-        </div>
-        <div class="text-right shrink-0">${stBadge}</div>
-      </div>
-      <div class="flex flex-wrap gap-1.5 pt-1.5 border-t border-slate-800">
-        <button data-bet-set="${esc(b.id)}:won" class="px-2 py-1 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">✅ Vinta</button>
-        <button data-bet-set="${esc(b.id)}:lost" class="px-2 py-1 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px] font-bold">❌ Persa</button>
-        <button data-bet-set="${esc(b.id)}:void" class="px-2 py-1 rounded bg-slate-800 text-slate-300 text-[10px] font-bold">↩️ Rimb.</button>
-        <button data-bet-del="${esc(b.id)}" class="ml-auto px-2 py-1 rounded bg-slate-800 text-rose-300 text-[10px]">🗑️</button>
-      </div>
-    </div>`;
-  }).join("");
-}
+window.exportHistory = () => {
+  const data = getTeamHist();
+  if (!Object.keys(data).length) return alert("Nessuno storico da esportare.");
+  const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `footpredict-storico-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+  URL.revokeObjectURL(url);
+};
