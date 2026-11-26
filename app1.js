@@ -3,6 +3,11 @@ const LEGACY_HIST_KEY = "fp_team_hist_9m";
 const STANDINGS_KEY = "fp_standings_cache_v2";
 const BET_KEY = "fp_bet_log_v1";
 const SLIP_KEY = "fp_slip_v1";
+const ODDS_KEY_STORAGE = "fp_odds_api_key_v1";
+const ODDS_CACHE_KEY = "fp_odds_cache_v1";
+const ODDS_SPORTS_KEY = "fp_odds_sports_v1";
+const ODDS_QUOTA_KEY = "fp_odds_quota_v1";
+const ODDS_TTL = 45 * 60 * 1000;
 const STANDINGS_TTL = 30 * 60 * 1000;
 const EXTRA_RE = /\b(AET|ET|PEN|PENS|PSO|FT-PENS)\b/;
 
@@ -19,6 +24,35 @@ const COMPS = [
   ["caf.nations", "Coppa d'Africa", "Nazionali", "🌍"], ["fifa.friendly", "Amichevoli Int.", "Nazionali", "🌍"],
   ["bra.1", "Brasileirão", "Campionato", "🇧🇷"], ["arg.1", "Liga Profesional", "Campionato", "🇦🇷"], ["usa.1", "MLS", "Campionato", "🇺🇸"]
 ];
+
+const ODDS_SPORT_MAP = {
+  "ita.1": "soccer_italy_serie_a",
+  "ita.2": "soccer_italy_serie_b",
+  "ita.coppa_italia": "soccer_italy_coppa_italia",
+  "eng.1": "soccer_epl",
+  "eng.2": "soccer_efl_champ",
+  "eng.fa": "soccer_fa_cup",
+  "eng.league_cup": "soccer_england_efl_cup",
+  "esp.1": "soccer_spain_la_liga",
+  "esp.copa_del_rey": "soccer_spain_copa_del_rey",
+  "ger.1": "soccer_germany_bundesliga",
+  "ger.dfb_pokal": "soccer_germany_dfb_pokal",
+  "fra.1": "soccer_france_ligue_one",
+  "ned.1": "soccer_netherlands_eredivisie",
+  "por.1": "soccer_portugal_primeira_liga",
+  "tur.1": "soccer_turkey_super_league",
+  "bel.1": "soccer_belgium_first_div",
+  "sco.1": "soccer_spl",
+  "uefa.champions": "soccer_uefa_champs_league",
+  "uefa.europa": "soccer_uefa_europa_league",
+  "uefa.europa.conf": "soccer_uefa_europa_conference_league",
+  "uefa.nations": "soccer_uefa_nations_league",
+  "fifa.worldq.uefa": "soccer_fifa_world_cup_qualifiers_europe",
+  "bra.1": "soccer_brazil_campeonato",
+  "arg.1": "soccer_argentina_primera_division",
+  "usa.1": "soccer_usa_mls"
+};
+
 const AM_LEAGUES = new Set(["bra.1", "arg.1", "usa.1"]);
 const Q_PREFIX = "fp_q4_" + COMPS.length + "_";
 const MONTH_PREFIX = "fp_m4_" + COMPS.length + "_";
@@ -30,7 +64,8 @@ const GLOBAL_TEAM_STATS = {};
 const SLIP = new Map();
 const st = {
   tab: "oggi", search: "", minConf: 0, market: "all", sort: "league",
-  onlyPlayable: false, collapsed: new Set(), allCollapsed: false, autoCal: true
+  onlyPlayable: false, onlyValue: false, collapsed: new Set(), allCollapsed: false,
+  autoCal: true, useMarketBlend: true
 };
 
 const LEAGUE_TIER = {
@@ -293,6 +328,221 @@ const ESPNProvider = {
   }
 };
 
+const TEAM_ALIASES = {
+  "internazionale": "inter", "inter milan": "inter", "fc internazionale milano": "inter",
+  "ac milan": "milan", "milan": "milan",
+  "as roma": "roma", "roma": "roma",
+  "ssc napoli": "napoli", "napoli": "napoli",
+  "paris saint germain": "psg", "paris saint-germain": "psg", "psg": "psg",
+  "manchester united": "man utd", "man united": "man utd",
+  "manchester city": "man city", "man city": "man city",
+  "wolverhampton wanderers": "wolves", "wolves": "wolves",
+  "brighton and hove albion": "brighton", "brighton hove albion": "brighton",
+  "tottenham hotspur": "tottenham", "tottenham": "tottenham",
+  "sporting cp": "sporting lisbon", "sporting lisbon": "sporting lisbon",
+  "atletico madrid": "atletico madrid", "athletic club": "athletic bilbao",
+  "bayern munich": "bayern", "bayern munchen": "bayern",
+  "psv eindhoven": "psv", "psv": "psv",
+  "feyenoord rotterdam": "feyenoord", "feyenoord": "feyenoord",
+  "hellas verona": "verona", "verona": "verona",
+  "como 1907": "como", "como": "como"
+};
+
+function normTeamName(name) {
+  const cleaned = String(name || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\b(fc|cf|ac|as|ss|ssc|us|sc|afc|rc|cd|ud|fk|sk|sv|vfb|tsg|fsv|rb|1|club|calcio|hotspur|wanderers)\b/g, " ")
+    .replace(/\s+/g, " ").trim();
+  return TEAM_ALIASES[cleaned] || TEAM_ALIASES[String(name || "").toLowerCase().trim()] || cleaned;
+}
+
+function teamSimScore(a, b) {
+  const na = normTeamName(a), nb = normTeamName(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  if (na.includes(nb) || nb.includes(na)) return 0.9;
+  const ta = new Set(na.split(" ").filter(x => x.length >= 2));
+  const tb = new Set(nb.split(" ").filter(x => x.length >= 2));
+  if (!ta.size || !tb.size) return 0;
+  let inter = 0;
+  ta.forEach(t => { if (tb.has(t)) inter++; });
+  return inter / Math.max(ta.size, tb.size);
+}
+
+const OddsProvider = {
+  getKey() {
+    try { return (localStorage.getItem(ODDS_KEY_STORAGE) || "").trim(); } catch { return ""; }
+  },
+  setKey(k) {
+    try {
+      const clean = String(k || "").trim();
+      if (clean) localStorage.setItem(ODDS_KEY_STORAGE, clean);
+      else localStorage.removeItem(ODDS_KEY_STORAGE);
+    } catch {}
+  },
+  getQuota() {
+    try { return JSON.parse(localStorage.getItem(ODDS_QUOTA_KEY) || "null"); } catch { return null; }
+  },
+  saveQuota(headers) {
+    try {
+      const rem = headers?.get?.("x-requests-remaining");
+      const used = headers?.get?.("x-requests-used");
+      if (rem !== null || used !== null) {
+        localStorage.setItem(ODDS_QUOTA_KEY, JSON.stringify({ remaining: rem, used, ts: Date.now() }));
+      }
+    } catch {}
+  },
+  loadCache() {
+    try { return JSON.parse(localStorage.getItem(ODDS_CACHE_KEY) || "{}"); } catch { return {}; }
+  },
+  saveCache(cache) {
+    try { localStorage.setItem(ODDS_CACHE_KEY, JSON.stringify(cache)); } catch {}
+  },
+  clearCache() {
+    try { localStorage.removeItem(ODDS_CACHE_KEY); localStorage.removeItem(ODDS_SPORTS_KEY); } catch {}
+  },
+  async fetchActiveSports(apiKey) {
+    try {
+      const cached = JSON.parse(localStorage.getItem(ODDS_SPORTS_KEY) || "null");
+      if (cached && (Date.now() - cached.ts) < 12 * 3600 * 1000 && Array.isArray(cached.keys)) {
+        return new Set(cached.keys);
+      }
+    } catch {}
+    const r = await ESPNProvider.fetchWithTimeout(`https://api.the-odds-api.com/v4/sports/?apiKey=${encodeURIComponent(apiKey)}`, 7000);
+    if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
+    const arr = await r.json();
+    const keys = (Array.isArray(arr) ? arr : []).filter(x => x.active && String(x.key || "").startsWith("soccer_")).map(x => x.key);
+    try { localStorage.setItem(ODDS_SPORTS_KEY, JSON.stringify({ ts: Date.now(), keys })); } catch {}
+    return new Set(keys);
+  },
+  async fetchLeagueOdds(sportKey, apiKey, force = false) {
+    const cache = this.loadCache();
+    const hit = cache[sportKey];
+    if (!force && hit && (Date.now() - hit.ts) < ODDS_TTL) {
+      return { events: hit.events, fromCache: true };
+    }
+    const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${encodeURIComponent(apiKey)}&regions=eu&markets=h2h,totals&oddsFormat=decimal`;
+    const r = await ESPNProvider.fetchWithTimeout(url, 8000);
+    if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
+    this.saveQuota(r.headers);
+    const events = await r.json();
+    cache[sportKey] = { ts: Date.now(), events: Array.isArray(events) ? events : [] };
+    this.saveCache(cache);
+    return { events: cache[sportKey].events, fromCache: false };
+  }
+};
+
+function extractOddsData(ev) {
+  const books = ev.bookmakers || [];
+  if (!books.length) return null;
+  const best = {};
+  const updBest = (code, price, bookTitle) => {
+    const val = Number(price);
+    if (!Number.isFinite(val) || val <= 1.01) return;
+    if (!best[code] || val > best[code].odd) best[code] = { odd: val, book: bookTitle };
+  };
+
+  let sharpH2H = null, sharpTot = null;
+  const allH2H = [], allTot = [];
+
+  books.forEach(bk => {
+    const title = bk.title || bk.key || "Book";
+    (bk.markets || []).forEach(mk => {
+      if (mk.key === "h2h") {
+        let o1 = null, ox = null, o2 = null;
+        (mk.outcomes || []).forEach(out => {
+          if (out.name === "Draw") ox = Number(out.price);
+          else if (teamSimScore(out.name, ev.home_team) >= 0.7) o1 = Number(out.price);
+          else if (teamSimScore(out.name, ev.away_team) >= 0.7) o2 = Number(out.price);
+        });
+        if (o1 > 1 && ox > 1 && o2 > 1) {
+          updBest("1", o1, title); updBest("X", ox, title); updBest("2", o2, title);
+          const item = { o1, ox, o2, key: bk.key };
+          allH2H.push(item);
+          if (bk.key === "pinnacle" || (!sharpH2H && bk.key === "betfair_ex_eu")) sharpH2H = item;
+        }
+      } else if (mk.key === "totals") {
+        let oO = null, oU = null;
+        (mk.outcomes || []).forEach(out => {
+          if (Number(out.point) !== 2.5) return;
+          if (out.name === "Over") oO = Number(out.price);
+          else if (out.name === "Under") oU = Number(out.price);
+        });
+        if (oO > 1 && oU > 1) {
+          updBest("Over 2.5", oO, title); updBest("Under 2.5", oU, title);
+          const item = { oO, oU, key: bk.key };
+          allTot.push(item);
+          if (bk.key === "pinnacle" || (!sharpTot && bk.key === "betfair_ex_eu")) sharpTot = item;
+        }
+      }
+    });
+  });
+
+  if (!Object.keys(best).length) return null;
+
+  let mktP1 = null, mktPX = null, mktP2 = null, sharpSrc = null;
+  if (sharpH2H) {
+    const inv = 1 / sharpH2H.o1 + 1 / sharpH2H.ox + 1 / sharpH2H.o2;
+    mktP1 = (1 / sharpH2H.o1) / inv; mktPX = (1 / sharpH2H.ox) / inv; mktP2 = (1 / sharpH2H.o2) / inv;
+    sharpSrc = sharpH2H.key === "pinnacle" ? "Pinnacle" : "Betfair Ex";
+  } else if (allH2H.length) {
+    let s1 = 0, sx = 0, s2 = 0;
+    allH2H.forEach(x => {
+      const inv = 1 / x.o1 + 1 / x.ox + 1 / x.o2;
+      s1 += (1 / x.o1) / inv; sx += (1 / x.ox) / inv; s2 += (1 / x.o2) / inv;
+    });
+    mktP1 = s1 / allH2H.length; mktPX = sx / allH2H.length; mktP2 = s2 / allH2H.length;
+    sharpSrc = `Media ${allH2H.length} book`;
+  }
+
+  let mktPO = null, mktPU = null;
+  if (sharpTot) {
+    const inv = 1 / sharpTot.oO + 1 / sharpTot.oU;
+    mktPO = (1 / sharpTot.oO) / inv; mktPU = (1 / sharpTot.oU) / inv;
+  } else if (allTot.length) {
+    let sO = 0, sU = 0;
+    allTot.forEach(x => {
+      const inv = 1 / x.oO + 1 / x.oU;
+      sO += (1 / x.oO) / inv; sU += (1 / x.oU) / inv;
+    });
+    mktPO = sO / allTot.length; mktPU = sU / allTot.length;
+  }
+
+  return { best, mktP1, mktPX, mktP2, mktPO, mktPU, sharpSrc, booksCount: books.length };
+}
+
+function attachOddsToLeagues(leagues) {
+  const cache = OddsProvider.loadCache();
+  let matched = 0;
+  leagues.forEach(l => {
+    const sportKey = ODDS_SPORT_MAP[l.id];
+    const cached = sportKey ? cache[sportKey] : null;
+    if (!cached || (Date.now() - cached.ts) > ODDS_TTL || !Array.isArray(cached.events)) {
+      l.matches.forEach(m => { delete m.odds; });
+      return;
+    }
+    l.matches.forEach(m => {
+      delete m.odds;
+      let bestEv = null, bestScore = 0;
+      cached.events.forEach(ev => {
+        const evTs = Date.parse(ev.commence_time);
+        if (Number.isFinite(evTs) && m.startTs && Math.abs(evTs - m.startTs) > 90 * 60 * 1000) return;
+        const sh = teamSimScore(m.home, ev.home_team), sa = teamSimScore(m.away, ev.away_team);
+        if (sh >= 0.5 && sa >= 0.5) {
+          const sc = sh + sa;
+          if (sc > bestScore) { bestScore = sc; bestEv = ev; }
+        }
+      });
+      if (bestEv) {
+        const parsed = extractOddsData(bestEv);
+        if (parsed) { m.odds = parsed; matched++; }
+      }
+    });
+  });
+  return matched;
+}
+
 const FACT = [1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800];
 const pois = (k, l) => (Math.pow(l, k) * Math.exp(-l)) / FACT[k];
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
@@ -421,6 +671,27 @@ function calcPred(m, ov = {}, useCal = true) {
     if (s.j >= 1) pAwayG += s.p;
   }
 
+  let marketDiv = 0;
+  const rawProbs = { p1, px, p2, pO };
+  if (useCal && m.odds && Number.isFinite(m.odds.mktP1)) {
+    marketDiv = Math.max(
+      Math.abs(p1 - m.odds.mktP1),
+      Math.abs(px - m.odds.mktPX),
+      Math.abs(p2 - m.odds.mktP2)
+    );
+    if (st.useMarketBlend) {
+      const wM = 0.28, wP = 1 - wM;
+      const b1 = wP * p1 + wM * m.odds.mktP1;
+      const bx = wP * px + wM * m.odds.mktPX;
+      const b2 = wP * p2 + wM * m.odds.mktP2;
+      const bSum = b1 + bx + b2;
+      p1 = b1 / bSum; px = bx / bSum; p2 = b2 / bSum;
+      if (Number.isFinite(m.odds.mktPO)) {
+        pO = clamp(wP * pO + wM * m.odds.mktPO, 0.02, 0.98);
+      }
+    }
+  }
+
   const topScores = scores.sort((a, b) => b.p - a.p).slice(0, 3).map(s => ({ score: `${s.i}-${s.j}`, prob: s.p }));
   const best1X2 = [
     { code: "1", cat: "1X2", label: "Vittoria " + m.home, prob: p1 },
@@ -453,9 +724,23 @@ function calcPred(m, ov = {}, useCal = true) {
   const ouPick = pO >= 0.5 ? { code: "Over 2.5", prob: pO, isOver: true } : { code: "Under 2.5", prob: 1 - pO, isOver: false };
   const edge = pickEdge(bestPick.code, bestPick.prob);
   const sig = clamp(0.38 + edge * 0.95, 0.25, 1);
-  const baseConf = (sig * 0.48 + m.stats.comp * 0.28 + (1 - m.stats.vol) * 0.24) * 100;
+  let baseConf = (sig * 0.48 + m.stats.comp * 0.28 + (1 - m.stats.vol) * 0.24) * 100;
+  if (marketDiv >= 0.14) baseConf -= 6;
   const conf = Math.min(94, Math.max(35, Math.round(baseConf)));
   const rankScore = (sig * 100) * 0.55 + conf * 0.45;
+
+  let bestValue = null;
+  if (m.odds?.best) {
+    const probByCode = { "1": p1, "X": px, "2": p2, "Over 2.5": pO, "Under 2.5": 1 - pO };
+    Object.entries(probByCode).forEach(([code, prob]) => {
+      const bObj = m.odds.best[code];
+      if (!bObj || prob < 0.22) return;
+      const ev = prob * bObj.odd - 1;
+      if (ev >= 0.02 && (!bestValue || ev > bestValue.ev)) {
+        bestValue = { code, prob, odd: bObj.odd, book: bObj.book, ev };
+      }
+    });
+  }
 
   const combos = [
     { code: p1 >= p2 ? "1X + Over 1.5" : "X2 + Over 1.5", prob: p1 >= p2 ? p1X_O15 : pX2_O15 },
@@ -470,6 +755,7 @@ function calcPred(m, ov = {}, useCal = true) {
   return {
     lamH: lamH.toFixed(2), lamA: lamA.toFixed(2),
     probs: { p1, px, p2, pO, pU: 1 - pO, pG, pNG: 1 - pG },
+    rawProbs, marketDiv, bestValue,
     bestPick, best1X2, ouPick, topScores, combos, confidence: conf, rankScore
   };
 }
