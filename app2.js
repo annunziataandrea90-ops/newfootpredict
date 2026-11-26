@@ -9,6 +9,81 @@ function recalcAllPredictions() {
   LEAGUES.forEach(l => l.matches.forEach(m => { m.prediction = calcPred(m); }));
 }
 
+function updateOddsStatusBar(customMsg = null) {
+  const el = document.getElementById("oddsStatusLine");
+  const keyBtn = document.getElementById("oddsKeyBtn");
+  const hasKey = Boolean(OddsProvider.getKey());
+  if (keyBtn) keyBtn.textContent = hasKey ? "🔑 OK" : "🔑 Key";
+  if (!el) return;
+  if (customMsg) {
+    el.classList.remove("hidden");
+    el.textContent = customMsg;
+    return;
+  }
+  const matched = LEAGUES.reduce((s, l) => s + l.matches.filter(m => m.odds).length, 0);
+  const quota = OddsProvider.getQuota();
+  if (matched > 0) {
+    const qTxt = quota?.remaining != null ? ` • Crediti rimasti: ${quota.remaining}` : "";
+    el.classList.remove("hidden");
+    el.textContent = `💰 Quote reali attive su ${matched} partite${qTxt}`;
+  } else {
+    el.classList.add("hidden");
+  }
+}
+
+async function fetchOddsForCurrentDay(force = false) {
+  const apiKey = OddsProvider.getKey();
+  if (!apiKey) { openOddsKeyModal(); return; }
+  const btn = document.getElementById("oddsFetchBtn");
+  btn.disabled = true;
+  try {
+    updateOddsStatusBar("🔎 Controllo campionati attivi (0 crediti)...");
+    const activeSports = await OddsProvider.fetchActiveSports(apiKey);
+    const targetLeagues = LEAGUES.filter(l =>
+      ODDS_SPORT_MAP[l.id] &&
+      activeSports.has(ODDS_SPORT_MAP[l.id]) &&
+      l.matches.some(m => m.stateType === "pre" || m.stateType === "in")
+    );
+    if (!targetLeagues.length) {
+      updateOddsStatusBar("Nessun campionato con partite aperte trovato per le quote.");
+      return;
+    }
+
+    let done = 0, usedCache = 0, errMsg = "";
+    for (const l of targetLeagues) {
+      const sportKey = ODDS_SPORT_MAP[l.id];
+      updateOddsStatusBar(`💰 Scarico quote ${++done}/${targetLeagues.length} (${l.name})...`);
+      try {
+        const res = await OddsProvider.fetchLeagueOdds(sportKey, apiKey, force);
+        if (res.fromCache) usedCache++;
+      } catch (err) {
+        errMsg = err?.status === 401 ? "API Key non valida (401)"
+          : err?.status === 429 ? "Limite richieste/crediti raggiunto (429)"
+          : (err?.message || "Errore rete");
+        if (err?.status === 401 || err?.status === 429) break;
+      }
+    }
+
+    if (errMsg) {
+      updateOddsStatusBar(`❌ ${errMsg}`);
+      return;
+    }
+
+    const matched = attachOddsToLeagues(LEAGUES);
+    recalcAllPredictions();
+    syncSlipFromLeagues();
+    renderSchedule();
+    const quota = OddsProvider.getQuota();
+    const qTxt = quota?.remaining != null ? ` • Crediti rimasti: ${quota.remaining}` : "";
+    const cacheTxt = usedCache ? ` (${usedCache} da cache)` : "";
+    updateOddsStatusBar(`✅ Quote abbinate su ${matched} partite${cacheTxt}${qTxt}`);
+  } catch (err) {
+    updateOddsStatusBar(`❌ Errore quote: ${err?.status === 401 ? "API Key non valida" : (err?.message || "connessione fallita")}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function fetchScoreboardDay(slug, dp, diag) {
   try {
     const events = await ESPNProvider.fetchScoreboard(slug, dp, null, 0);
@@ -31,12 +106,14 @@ async function loadDay(offset, force = false) {
   if (!force && cached && (Date.now() - cached.ts) < ttl) {
     LEAGUES = cached.leagues;
     lastDiag = cached.diagMsg || "";
+    attachOddsToLeagues(LEAGUES);
     recalcAllPredictions();
     const tot = LEAGUES.reduce((s, l) => s + l.matches.length, 0);
     badge.textContent = "LIVE REALE";
     badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
     sub.textContent = `${tot} partite (${dp.slice(6,8)}/${dp.slice(4,6)}) • Cache veloce`;
     syncSlipFromLeagues();
+    updateOddsStatusBar();
     renderSchedule();
     return;
   }
@@ -146,7 +223,7 @@ async function loadDay(offset, force = false) {
         const tierA = (LEAGUE_TIER[domSlugA]?.s) ?? 0.88;
         const baseVol = b.slug === "fifa.friendly" ? 0.42 : (b.kind === "Nazionali" ? (ok ? 0.28 : 0.38) : (b.kind === "Coppa" ? (ok ? 0.25 : 0.37) : (ok ? 0.20 : 0.34)));
 
-        const m = {
+        return {
           id: ev.id, dp, espnDp: ev._espnDp || dp, slug: b.slug, leagueId: b.slug, leagueName: b.name, kind: b.kind, flag: b.flag,
           time: timeStr, startTs, stateType, isExtra, hasScore, hScore, aScore, neutralSite: isNeutral,
           scoreStr: ((stateType === "in" || stateType === "post") && hasScore) ? `${hScore} - ${aScore}` : "- : -",
@@ -165,11 +242,12 @@ async function loadDay(offset, force = false) {
             comp: ok ? 0.92 : (home.form && away.form ? 0.72 : 0.54), vol: baseVol
           }
         };
-        m.prediction = calcPred(m);
-        return m;
       });
       return { id: b.slug, name: b.name, kind: b.kind, flag: b.flag, matches };
     });
+
+    attachOddsToLeagues(LEAGUES);
+    recalcAllPredictions();
 
     const tot = LEAGUES.reduce((s, l) => s + l.matches.length, 0);
     lastDiag = tot === 0
@@ -183,6 +261,7 @@ async function loadDay(offset, force = false) {
     badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
     sub.textContent = `${tot} partite (${dp.slice(6,8)}/${dp.slice(4,6)}) • Agg. ${nowStr}`;
     syncSlipFromLeagues();
+    updateOddsStatusBar();
     renderSchedule();
   } catch (err) {
     console.error("Errore loadDay:", err);
