@@ -10,15 +10,16 @@ function syncSlipFromLeagues() {
         slug: m.slug, dp: m.dp, espnDp: m.espnDp, startTs: m.startTs,
         leagueId: m.leagueId, leagueName: m.leagueName, home: m.home, away: m.away
       };
-      if (!item.custom) {
-        SLIP.set(id, {
-          ...baseUpdate, id: m.id,
-          code: m.prediction.bestPick.code, prob: m.prediction.bestPick.prob,
-          bookOdd: item.bookOdd || null, custom: false
-        });
-      } else {
-        SLIP.set(id, { ...item, ...baseUpdate });
-      }
+      const code = item.custom ? item.code : m.prediction.bestPick.code;
+      const probMap = buildPickMap(m.prediction);
+      const prob = item.custom ? (probMap[code] ?? item.prob) : m.prediction.bestPick.prob;
+      const realOdd = m.odds?.best?.[code]?.odd || null;
+      SLIP.set(id, {
+        ...baseUpdate, id: m.id, code, prob,
+        bookOdd: item.manualOdd ? item.bookOdd : (realOdd || item.bookOdd || null),
+        manualOdd: Boolean(item.manualOdd),
+        custom: Boolean(item.custom)
+      });
       changed = true;
     }
   });
@@ -33,12 +34,13 @@ function toggleSlipMatch(lid, mid, customPick = null) {
     if (!SLIP.has(mid) && SLIP.size >= 8) { alert("Massimo 8 eventi nella schedina."); return; }
     const l = LEAGUES.find(x => x.id === lid), m = l?.matches.find(x => x.id === mid);
     if (!m) return;
+    const code = customPick ? customPick.code : m.prediction.bestPick.code;
+    const prob = customPick ? customPick.prob : m.prediction.bestPick.prob;
+    const realOdd = m.odds?.best?.[code]?.odd || null;
     SLIP.set(mid, {
       id: m.id, slug: m.slug, dp: m.dp, espnDp: m.espnDp, startTs: m.startTs,
       leagueId: m.leagueId, leagueName: m.leagueName, home: m.home, away: m.away,
-      code: customPick ? customPick.code : m.prediction.bestPick.code,
-      prob: customPick ? customPick.prob : m.prediction.bestPick.prob,
-      bookOdd: null, custom: Boolean(customPick)
+      code, prob, bookOdd: realOdd, manualOdd: false, custom: Boolean(customPick)
     });
   }
   saveSlip();
@@ -276,6 +278,7 @@ function openSlipModal() {
       if (item) {
         const val = Number(inp.value);
         item.bookOdd = (Number.isFinite(val) && val > 1.0) ? val : null;
+        item.manualOdd = Boolean(item.bookOdd);
         saveSlip();
         updateSystemCalc();
       }
@@ -290,6 +293,59 @@ function openSlipModal() {
   });
 
   updateSystemCalc();
+  document.body.classList.add("overflow-hidden");
+  const mod = document.getElementById("detailModal");
+  mod.classList.remove("hidden"); mod.classList.add("flex");
+}
+
+function openOddsKeyModal() {
+  currentModalToken++;
+  const curKey = OddsProvider.getKey();
+  const quota = OddsProvider.getQuota();
+  document.getElementById("modalLeague").textContent = "The Odds API • Salvataggio solo su questo dispositivo";
+  document.getElementById("modalTitle").textContent = "🔑 Configura API Key Quote";
+  document.getElementById("modalBody").innerHTML = `
+    <div class="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs text-slate-300">
+      <p>La chiave viene salvata <strong>solo nel localStorage di questo browser</strong> (mai su GitHub).</p>
+      <p class="text-[11px] text-slate-400">Ogni chiamata usa <code>2 crediti</code> per campionato attivo (<code>regions=eu</code>, <code>markets=h2h,totals</code>) e resta in cache 45 minuti.</p>
+      ${quota?.remaining != null ? `<div class="text-[11px] text-emerald-400 font-bold">Ultimo saldo crediti rilevato: ${esc(quota.remaining)} rimasti</div>` : ""}
+    </div>
+    <div class="space-y-2 text-xs">
+      <label class="block text-slate-400 font-semibold">La tua API Key (The Odds API v4):</label>
+      <input id="oddsKeyInput" type="password" value="${esc(curKey)}" placeholder="Incolla qui la tua apiKey..."
+        class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+      <div class="flex gap-2">
+        <button id="saveOddsKeyBtn" class="flex-1 py-2 rounded-xl bg-emerald-500 text-slate-950 font-bold">💾 Salva Key</button>
+        <button id="clearOddsCacheBtn" class="px-3 py-2 rounded-xl bg-slate-800 text-cyan-300 border border-slate-700 font-semibold">🧹 Cache</button>
+        ${curKey ? `<button id="delOddsKeyBtn" class="px-3 py-2 rounded-xl bg-slate-800 text-rose-300 border border-slate-700 font-semibold">🗑️</button>` : ""}
+      </div>
+      <div id="oddsKeyMsg" class="text-[11px] text-emerald-400"></div>
+    </div>`;
+
+  document.getElementById("saveOddsKeyBtn").onclick = () => {
+    const val = document.getElementById("oddsKeyInput").value.trim();
+    if (!val) { document.getElementById("oddsKeyMsg").textContent = "Inserisci una chiave valida."; return; }
+    OddsProvider.setKey(val);
+    updateOddsStatusBar("✅ API Key salvata! Premi 💰 Scarica Quote per caricare le quote.");
+    closeModal();
+  };
+  document.getElementById("clearOddsCacheBtn").onclick = () => {
+    OddsProvider.clearCache();
+    attachOddsToLeagues(LEAGUES);
+    recalcAllPredictions(); renderSchedule(); updateOddsStatusBar("Cache quote svuotata.");
+    document.getElementById("oddsKeyMsg").textContent = "Cache quote svuotata.";
+  };
+  const delBtn = document.getElementById("delOddsKeyBtn");
+  if (delBtn) {
+    delBtn.onclick = () => {
+      OddsProvider.setKey("");
+      OddsProvider.clearCache();
+      attachOddsToLeagues(LEAGUES);
+      recalcAllPredictions(); renderSchedule(); updateOddsStatusBar();
+      closeModal();
+    };
+  }
+
   document.body.classList.add("overflow-hidden");
   const mod = document.getElementById("detailModal");
   mod.classList.remove("hidden"); mod.classList.add("flex");
@@ -321,15 +377,21 @@ function renderMatchRow(m, showLeague = false) {
   const slipItem = SLIP.get(m.id), inSlip = Boolean(slipItem);
   const customSlipBadge = (slipItem && slipItem.custom && slipItem.code !== p.bestPick.code)
     ? `<span class="text-[9px] text-emerald-300 font-bold">🎟️ ${esc(slipItem.code)}</span>` : "";
+  const valBadge = p.bestValue
+    ? `<span class="px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-400/40 text-[9px] font-extrabold">💎 +${Math.round(p.bestValue.ev * 100)}% (${esc(p.bestValue.code)} @${p.bestValue.odd.toFixed(2)})</span>` : "";
+  const divBadge = p.marketDiv >= 0.14
+    ? `<span class="text-[9px] text-amber-300 font-bold" title="Forte divergenza rispetto alle quote sharp di mercato">⚠️ Mkt</span>` : "";
 
   return `<div data-lid="${esc(m.leagueId)}" data-mid="${esc(m.id)}" class="match-card px-2.5 py-2.5 flex items-center justify-between gap-2 cursor-pointer hover:bg-slate-800/50 active:bg-slate-800 transition-colors ${isStar ? 'bg-emerald-500/5 border-l-2 border-l-emerald-400' : ''} ${isCanceled ? 'opacity-60' : ''}">
     <div class="min-w-0 flex-1">
-      <div class="text-[10px] text-slate-400 flex items-center gap-1.5">
+      <div class="text-[10px] text-slate-400 flex flex-wrap items-center gap-1.5">
         <span>${esc(m.time)}</span>
         ${showLeague ? `<span class="truncate text-slate-500">${m.flag} ${esc(m.leagueName)}</span>` : ""}
         ${isStar ? '<span class="text-[9px] font-bold text-emerald-400">⭐ TOP</span>' : ''}
         ${m.lowData ? '<span class="text-[9px] text-amber-400/90" title="Pochi dati statistici">⚠️</span>' : ''}
+        ${divBadge}
         ${customSlipBadge}
+        ${valBadge}
       </div>
       <div class="text-xs font-semibold text-white flex items-center min-w-0">${logoHtml(m.homeLogo)}<span class="truncate">${esc(m.home)}</span>${renderFormDots(m.formH)}</div>
       <div class="text-xs font-semibold text-slate-300 flex items-center min-w-0">${logoHtml(m.awayLogo)}<span class="truncate">${esc(m.away)}</span>${renderFormDots(m.formA)}</div>
@@ -361,6 +423,7 @@ function renderSchedule() {
     m.prediction.confidence >= st.minConf &&
     (st.market === "all" || m.prediction.bestPick.cat === st.market) &&
     (!st.onlyPlayable || m.stateType === "pre" || m.stateType === "in") &&
+    (!st.onlyValue || Boolean(m.prediction.bestValue)) &&
     (!q || `${l.name} ${l.kind} ${m.home} ${m.away}`.toLowerCase().includes(q));
 
   LEAGUES.forEach(l => {
@@ -391,6 +454,7 @@ function renderSchedule() {
     const sorted = allFiltered.slice().sort((a, b) => {
       if (st.sort === "time") return a.startTs - b.startTs;
       if (st.sort === "prob") return b.prediction.bestPick.prob - a.prediction.bestPick.prob;
+      if (st.sort === "ev") return (b.prediction.bestValue?.ev ?? -1) - (a.prediction.bestValue?.ev ?? -1);
       return b.prediction.confidence - a.prediction.confidence || b.prediction.rankScore - a.prediction.rankScore;
     });
     html = `<div class="glass rounded-2xl overflow-hidden divide-y divide-slate-800/70">${sorted.map(m => renderMatchRow(m, true)).join("")}</div>`;
@@ -427,10 +491,12 @@ function renderSchedule() {
       const chosen = playableTop.length ? playableTop : topList;
       SLIP.clear();
       chosen.forEach(m => {
+        const code = m.prediction.bestPick.code;
+        const realOdd = m.odds?.best?.[code]?.odd || null;
         SLIP.set(m.id, {
           id: m.id, slug: m.slug, dp: m.dp, espnDp: m.espnDp, startTs: m.startTs,
           leagueId: m.leagueId, leagueName: m.leagueName, home: m.home, away: m.away,
-          code: m.prediction.bestPick.code, prob: m.prediction.bestPick.prob, bookOdd: null, custom: false
+          code, prob: m.prediction.bestPick.prob, bookOdd: realOdd, manualOdd: false, custom: false
         });
       });
       saveSlip(); renderSlipBar(); renderSchedule(); openSlipModal();
@@ -508,6 +574,7 @@ async function loadModalSummary(m, token) {
 
 function renderModalStructure(m) {
   let activePick = { code: m.prediction.bestPick.code, prob: m.prediction.bestPick.prob };
+  const initRealOdd = m.odds?.best?.[activePick.code]?.odd || "";
 
   document.getElementById("modalBody").innerHTML = `
     <div id="modalDynamic" class="space-y-3"></div>
@@ -517,7 +584,7 @@ function renderModalStructure(m) {
       <div class="flex flex-wrap items-center justify-between gap-2">
         <span class="font-bold text-cyan-300">💰 Value &amp; Registra: <strong id="selectedMarketBadge" class="text-white"></strong></span>
         <div class="flex items-center gap-1.5">
-          <input id="bookOddInput" type="number" min="1.01" max="50" step="0.01" placeholder="${fairOdd(activePick.prob)}"
+          <input id="bookOddInput" type="number" min="1.01" max="50" step="0.01" value="${esc(initRealOdd)}" placeholder="${fairOdd(activePick.prob)}"
             class="w-28 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white text-right" />
           <input id="betStakeInput" type="number" min="0.1" max="100" step="0.5" value="1" title="Unità/Euro puntati"
             class="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white text-right" />
@@ -570,6 +637,8 @@ function renderModalStructure(m) {
     const btn = e.target.closest("[data-pick-code]");
     if (!btn) return;
     activePick = { code: btn.dataset.pickCode, prob: Number(btn.dataset.pickProb) };
+    const realOdd = m.odds?.best?.[activePick.code]?.odd;
+    bookInput.value = realOdd ? String(realOdd) : "";
     refreshSim();
   });
 
@@ -624,12 +693,34 @@ function updateModalDynamic(m, ov = {}, selectedCode = null) {
 
   const pillBtn = (k, v) => {
     const active = sel === k;
+    const realObj = m.odds?.best?.[k];
+    const ev = realObj ? (v * realObj.odd - 1) : null;
+    const evTag = (ev !== null && ev >= 0.02) ? ` <span class="text-fuchsia-300">+${Math.round(ev * 100)}%</span>` : "";
     return `<button data-pick-code="${esc(k)}" data-pick-prob="${v}" class="p-2 rounded-lg border text-center transition-colors ${active ? 'bg-cyan-500/20 border-cyan-400' : 'bg-slate-950 border-slate-800 hover:border-slate-600'}">
-      <div class="text-[10px] ${active ? 'text-cyan-300 font-bold' : 'text-slate-400'}">${esc(k)}</div>
+      <div class="text-[10px] ${active ? 'text-cyan-300 font-bold' : 'text-slate-400'}">${esc(k)}${evTag}</div>
       <div class="font-bold text-white text-xs">${(v * 100).toFixed(0)}%</div>
-      <div class="text-[9px] text-slate-500">@${fairOdd(v)}</div>
+      <div class="text-[9px] text-slate-500">${realObj ? `Book @${realObj.odd.toFixed(2)}` : `@${fairOdd(v)}`}</div>
     </button>`;
   };
+
+  let oddsCard = "";
+  if (m.odds) {
+    const b = m.odds.best;
+    const fmtB = code => b[code] ? `<strong class="text-white">@${b[code].odd.toFixed(2)}</strong> <span class="text-slate-500">(${esc(b[code].book)})</span>` : "-";
+    const sharpInfo = m.odds.mktP1
+      ? `Sharp (${esc(m.odds.sharpSrc)}): 1 ${Math.round(m.odds.mktP1 * 100)}% • X ${Math.round(m.odds.mktPX * 100)}% • 2 ${Math.round(m.odds.mktP2 * 100)}%`
+      : "";
+    const divAlert = p.marketDiv >= 0.14
+      ? `<div class="p-1.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px]">⚠️ Divergenza forte (${Math.round(p.marketDiv * 100)}%) tra modello puro e mercato: possibili assenze o motivazioni non visibili in classifica.</div>` : "";
+    oddsCard = `<div class="p-3 rounded-xl bg-slate-950 border border-fuchsia-500/30 space-y-1.5 text-[10px]">
+      <div class="flex justify-between items-center"><span class="font-bold text-fuchsia-300">💰 Migliori Quote Reali EU (${m.odds.booksCount} book)</span><span class="text-slate-400">${sharpInfo}</span></div>
+      <div class="grid grid-cols-3 gap-1.5 text-center bg-slate-900/70 rounded-lg p-1.5">
+        <div>1: ${fmtB("1")}</div><div>X: ${fmtB("X")}</div><div>2: ${fmtB("2")}</div>
+      </div>
+      ${(b["Over 2.5"] || b["Under 2.5"]) ? `<div class="grid grid-cols-2 gap-1.5 text-center bg-slate-900/70 rounded-lg p-1.5"><div>Over 2.5: ${fmtB("Over 2.5")}</div><div>Under 2.5: ${fmtB("Under 2.5")}</div></div>` : ""}
+      ${divAlert}
+    </div>`;
+  }
 
   document.getElementById("modalDynamic").innerHTML = `
     ${started ? `<div class="p-3 rounded-xl bg-slate-950 border ${m.isExtra ? 'border-amber-500/40' : (pickOk ? 'border-emerald-500/40' : 'border-rose-500/40')} flex justify-between items-center gap-2">
@@ -648,6 +739,7 @@ function updateModalDynamic(m, ov = {}, selectedCode = null) {
         <div class="text-[11px] text-slate-300">Gol attesi: ${p.lamH} - ${p.lamA}</div>
       </div>
     </div>
+    ${oddsCard}
     <div class="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
       <div class="flex justify-between text-[11px]"><span class="font-bold text-fuchsia-300">Over 2.5 (${overPct}%)</span><span class="px-2 py-0.5 rounded bg-slate-800 text-white font-semibold">${esc(p.ouPick.code)} @${fairOdd(p.ouPick.prob)}</span><span class="font-bold text-indigo-300">Under 2.5 (${underPct}%)</span></div>
       <div class="w-full h-2 rounded-full overflow-hidden flex bg-slate-800"><div class="bg-fuchsia-500" style="width:${overPct}%"></div><div class="bg-indigo-500" style="width:${underPct}%"></div></div>
@@ -867,8 +959,12 @@ document.getElementById("importHistInput").onchange = async e => {
   finally { e.target.value = ""; }
 };
 
+document.getElementById("oddsFetchBtn").onclick = () => fetchOddsForCurrentDay(false);
+document.getElementById("oddsKeyBtn").onclick = openOddsKeyModal;
 document.getElementById("autoCalToggle").onchange = e => { st.autoCal = e.target.checked; recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule(); };
+document.getElementById("marketBlendToggle").onchange = e => { st.useMarketBlend = e.target.checked; recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule(); };
 document.getElementById("onlyPlayableToggle").onchange = e => { st.onlyPlayable = e.target.checked; renderSchedule(); };
+document.getElementById("onlyValueToggle").onchange = e => { st.onlyValue = e.target.checked; renderSchedule(); };
 document.getElementById("sortFilter").onchange = e => {
   st.sort = e.target.value;
   document.getElementById("toggleAllBtn").classList.toggle("hidden", st.sort !== "league");
@@ -905,6 +1001,7 @@ function shouldAutoRefreshToday() {
     if (LEAGUES.length) { recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule(); }
   });
   await Promise.race([storagePromise, new Promise(res => setTimeout(res, 1500))]);
+  updateOddsStatusBar();
   await loadDay(0);
   setInterval(() => {
     const modalOpen = !document.getElementById("detailModal").classList.contains("hidden");
