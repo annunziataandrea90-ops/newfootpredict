@@ -212,10 +212,10 @@ function setScanBusy(busy) {
 window.stopScan = () => {
   if (!isScanning) return;
   scanAborted = true;
-  document.getElementById("histScanStatus").textContent = "⏹️ Interruzione richiesta, completo il blocco corrente...";
+  document.getElementById("histScanStatus").textContent = "⏹️ Interruzione richiesta, completo il mese corrente...";
 };
 
-function parseQuarterEvents(events, slug, compName, kind, flag, targetMap) {
+function parseMonthEvents(events, slug, compName, kind, flag, targetMap) {
   events.forEach(ev => {
     if (targetMap.has(ev.id)) return;
     const stType = ev.status?.type, isExtra = EXTRA_RE.test((stType?.shortDetail || "").toUpperCase()) || Number(ev.status?.period) > 2;
@@ -236,22 +236,16 @@ function parseQuarterEvents(events, slug, compName, kind, flag, targetMap) {
   });
 }
 
-function buildQuarters(startD, endD) {
-  const quarters = [];
-  const startY = startD.getFullYear(), startQ = Math.floor(startD.getMonth() / 3);
-  const endY = endD.getFullYear(), endQ = Math.floor(endD.getMonth() / 3);
-  let y = startY, q = startQ;
-  while (y < endY || (y === endY && q <= endQ)) {
-    const mStart = q * 3 + 1;
-    const mEnd = mStart + 2;
-    const lastDay = String(new Date(y, mEnd, 0).getDate()).padStart(2, "0");
-    const qKey = `${y}Q${q + 1}`;
-    const range = `${y}${String(mStart).padStart(2, "0")}01-${y}${String(mEnd).padStart(2, "0")}${lastDay}`;
-    quarters.push({ y, q, mStart, mEnd, qKey, range });
-    q++;
-    if (q > 3) { q = 0; y++; }
+function buildMonths(startD, endD) {
+  const months = [];
+  const cur = new Date(startD.getFullYear(), startD.getMonth(), 1);
+  const last = new Date(endD.getFullYear(), endD.getMonth(), 1);
+  while (cur <= last) {
+    const y = cur.getFullYear(), m = cur.getMonth() + 1;
+    months.push({ y, m, ym: `${y}${String(m).padStart(2, "0")}` });
+    cur.setMonth(cur.getMonth() + 1);
   }
-  return quarters;
+  return months;
 }
 
 window.scanSeason = async totalDays => {
@@ -263,87 +257,67 @@ window.scanSeason = async totalDays => {
   wrapEl.classList.remove("hidden"); pWrap.classList.remove("hidden"); pBar.style.width = "2%";
 
   try {
+    const nowD = new Date();
     stEl.textContent = "🔎 Verifico connessione verso ESPN API...";
     try {
-      const probeRange = `${dateParam(-20)}-${dateParam(-1)}`;
-      await ESPNProvider.fetchScoreboard("eng.1", probeRange, 50, 0);
+      const probeDt = new Date(nowD.getFullYear(), nowD.getMonth() - 1, 1);
+      const probeYm = `${probeDt.getFullYear()}${String(probeDt.getMonth() + 1).padStart(2, "0")}`;
+      await ESPNProvider.fetchScoreboard("eng.1", probeYm, 100, 0);
     } catch (probeErr) {
       const msg = probeErr?.status ? `HTTP ${probeErr.status}` : (probeErr?.message || "blocco rete/proxy/CORS");
-      stEl.textContent = `❌ Impossibile scaricare da ESPN (${msg}). Se sei su rete aziendale prova da connessione personale o attendi qualche minuto se ESPN ha limitato le richieste.`;
+      stEl.textContent = `❌ Impossibile scaricare da ESPN (${msg}). Riprova tra qualche minuto.`;
       return;
     }
 
-    const nowD = new Date(), currentQKey = `${nowD.getFullYear()}Q${Math.floor(nowD.getMonth() / 3) + 1}`;
+    const currentYm = `${nowD.getFullYear()}${String(nowD.getMonth() + 1).padStart(2, "0")}`;
     const endD = new Date(); endD.setDate(endD.getDate() - 1); endD.setHours(23, 59, 59, 999);
     const startD = new Date(); startD.setDate(startD.getDate() - totalDays); startD.setHours(0, 0, 0, 0);
     const minTs = startD.getTime(), maxTs = endD.getTime();
-    const quarters = buildQuarters(startD, endD);
+    const months = buildMonths(startD, endD);
 
     const evMap = new Map();
     let reqOk = 0, reqErr = 0, lastErrStr = "";
 
-    for (let qIdx = 0; qIdx < quarters.length; qIdx++) {
+    for (let mIdx = 0; mIdx < months.length; mIdx++) {
       if (scanAborted) break;
-      const { y, mStart, mEnd, qKey, range } = quarters[qIdx];
-      const qEndDay = new Date(y, mEnd, 0);
-      const isClosedQ = qKey < currentQKey && (nowD.getTime() - qEndDay.getTime()) > 3 * 86400000;
+      const { y, m, ym } = months[mIdx];
+      const mEndDay = new Date(y, m, 0);
+      const isClosedM = ym < currentYm && (nowD.getTime() - mEndDay.getTime()) > 3 * 86400000;
 
-      let qRecords = null;
-      if (isClosedQ) {
-        try { qRecords = await idbGet(Q_PREFIX + qKey); } catch {}
+      let mRecords = null;
+      if (isClosedM) {
+        try { mRecords = await idbGet(MONTH_PREFIX + ym); } catch {}
       }
 
-      if (Array.isArray(qRecords)) {
-        stEl.textContent = `Cache trimestre ${qIdx + 1}/${quarters.length} (${qKey}) • ${evMap.size} match...`;
+      if (Array.isArray(mRecords)) {
+        stEl.textContent = `Cache mese ${mIdx + 1}/${months.length} (${ym.slice(4)}/${ym.slice(0, 4)}) • ${evMap.size.toLocaleString("it-IT")} match...`;
       } else {
-        stEl.textContent = `Scarico trimestre ${qIdx + 1}/${quarters.length} (${qKey}) • ${evMap.size} match...`;
-        const qDedup = new Map();
-        let qHttpErr = 0;
-        await mapWithConcurrency(COMPS, 4, async ([slug, compName, kind, flag]) => {
+        stEl.textContent = `Scarico mese ${mIdx + 1}/${months.length} (${ym.slice(4)}/${ym.slice(0, 4)}) • ${evMap.size.toLocaleString("it-IT")} match...`;
+        const mDedup = new Map();
+        let mFatalErr = 0;
+        await mapWithConcurrency(COMPS, 6, async ([slug, compName, kind, flag]) => {
           if (scanAborted) return;
           try {
-            const events = await ESPNProvider.fetchScoreboard(slug, range, 1000, 1);
+            const events = await ESPNProvider.fetchScoreboard(slug, ym, 300, 1);
             reqOk++;
-            if (events.length >= 950) {
-              for (let m = mStart; m <= mEnd; m++) {
-                if (scanAborted) break;
-                const lastMDay = String(new Date(y, m, 0).getDate()).padStart(2, "0");
-                const mRange = `${y}${String(m).padStart(2, "0")}01-${y}${String(m).padStart(2, "0")}${lastMDay}`;
-                const mEvents = await ESPNProvider.fetchScoreboard(slug, mRange, 500, 1);
-                parseQuarterEvents(mEvents, slug, compName, kind, flag, qDedup);
-              }
-            } else {
-              parseQuarterEvents(events, slug, compName, kind, flag, qDedup);
-            }
+            parseMonthEvents(events, slug, compName, kind, flag, mDedup);
           } catch (err) {
             reqErr++;
-            qHttpErr++;
             lastErrStr = err?.status ? `HTTP ${err.status}` : (err?.message || "errore rete");
-            if (err?.status === 400) {
-              for (let m = mStart; m <= mEnd; m++) {
-                if (scanAborted) break;
-                try {
-                  const lastMDay = String(new Date(y, m, 0).getDate()).padStart(2, "0");
-                  const mRange = `${y}${String(m).padStart(2, "0")}01-${y}${String(m).padStart(2, "0")}${lastMDay}`;
-                  const mEvents = await ESPNProvider.fetchScoreboard(slug, mRange, 500, 0);
-                  reqOk++;
-                  parseQuarterEvents(mEvents, slug, compName, kind, flag, qDedup);
-                } catch {}
-              }
-            }
+            if (!err?.status || err.status === 429 || err.status >= 500) mFatalErr++;
           }
         });
-        qRecords = Array.from(qDedup.values());
-        if (isClosedQ && !scanAborted && qRecords.length > 0 && qHttpErr === 0) {
-          try { await idbSet(Q_PREFIX + qKey, qRecords); } catch {}
+        mRecords = Array.from(mDedup.values());
+        if (isClosedM && !scanAborted && mRecords.length > 0 && mFatalErr === 0) {
+          try { await idbSet(MONTH_PREFIX + ym, mRecords); } catch {}
         }
-        await sleep(60);
+        await sleep(30);
       }
 
-      qRecords.forEach(rec => {
+      mRecords.forEach(rec => {
         if (rec.ts >= minTs && rec.ts <= maxTs && !evMap.has(rec.id)) evMap.set(rec.id, rec);
       });
-      pBar.style.width = `${Math.round(((qIdx + 1) / (quarters.length + 1)) * 100)}%`;
+      pBar.style.width = `${Math.round(((mIdx + 1) / (months.length + 1)) * 100)}%`;
     }
 
     if (evMap.size === 0) {
@@ -354,7 +328,7 @@ window.scanSeason = async totalDays => {
     }
 
     const allEvents = Array.from(evMap.values()).sort((a, b) => a.ts - b.ts);
-    stEl.textContent = `Analizzo ${allEvents.length} match + calcolo rating ELO storico...`;
+    stEl.textContent = `Analizzo ${allEvents.length.toLocaleString("it-IT")} match + calcolo rating ELO storico...`;
     await sleep(20);
 
     const rolling = {}, leagueRoll = {}, eloMap = {}, teams = {};
