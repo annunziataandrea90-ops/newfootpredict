@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="it" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FootPredict AI — ELO 10 Anni, Sistemi, Value &amp; Diario</title>
+  <link rel="icon" href="data:," />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #0b1120; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; }
+    .glass { background: rgba(30, 41, 59, 0.85); border: 1px solid rgba(148, 163, 184, 0.16); }
+  </style>
+</head>
+<body class="min-h-screen pb-24">
+
+  <header class="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/95 backdrop-blur">
+    <div class="max-w-3xl mx-auto px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
+      <div>
+        <h1 class="text-base font-bold text-white flex items-center gap-1.5">
+          ⚽ FootPredict
+          <span id="modeBadge" class="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">CARICO...</span>
+        </h1>
+        <p id="subStatus" class="text-[11px] text-slate-400">Poisson + ELO 10A + Sistemi • Value &amp; Diario</p>
+      </div>
+      <div class="flex flex-wrap bg-slate-900 p-1 rounded-xl border border-slate-800 gap-0.5">
+        <button data-tab="ieri" class="tab-btn px-2 py-1 text-xs font-semibold rounded-lg text-slate-300">Ieri</button>
+        <button data-tab="oggi" class="tab-btn px-2 py-1 text-xs font-semibold rounded-lg bg-emerald-500 text-slate-950">Oggi</button>
+        <button data-tab="domani" class="tab-btn px-2 py-1 text-xs font-semibold rounded-lg text-slate-300">Domani</button>
+        <button data-tab="storico" class="tab-btn px-2 py-1 text-xs font-semibold rounded-lg text-cyan-300">📊 10A</button>
+        <button data-tab="diario" class="tab-btn px-2 py-1 text-xs font-semibold rounded-lg text-amber-300">💼 Diario</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-3xl mx-auto px-3 mt-3 space-y-3">
+    <div id="viewPalinsesto" class="space-y-3">
+      <section id="topHighlights" class="hidden rounded-2xl p-3 bg-gradient-to-br from-emerald-950/80 via-slate-900 to-cyan-950/60 border border-emerald-500/40 space-y-2.5 shadow-lg shadow-emerald-950/30"></section>
+
+      <section class="glass rounded-2xl p-3 space-y-2.5">
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-2">
+          <input id="searchInput" type="text" placeholder="Cerca squadra o campionato..."
+            class="sm:col-span-2 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+          <select id="marketFilter" class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            <option value="all">Tutti i mercati</option>
+            <option value="1X2">Esito Secco (1/X/2)</option>
+            <option value="DC">Doppia Chance (1X/X2)</option>
+            <option value="GOALS">Gol / Under-Over</option>
+          </select>
+          <select id="sortFilter" class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            <option value="league">Ordina: Campionato</option>
+            <option value="time">Ordina: Orario</option>
+            <option value="prob">Ordina: Probabilità ↓</option>
+            <option value="conf">Ordina: Attendibilità ↓</option>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-center">
+          <div>
+            <div class="flex justify-between text-[11px] mb-1">
+              <span class="text-slate-400">Attendibilità min.</span>
+              <span id="minConfLabel" class="font-bold text-emerald-400">0%</span>
+            </div>
+            <input id="minConfSlider" type="range" min="0" max="90" step="5" value="0" class="w-full accent-emerald-500" />
+          </div>
+          <div class="flex flex-wrap items-center justify-between sm:justify-end gap-3 text-[11px]">
+            <label class="flex items-center gap-1.5 cursor-pointer text-amber-300 font-semibold">
+              <input id="onlyPlayableToggle" type="checkbox" class="accent-amber-400" />
+              <span>Solo PRE / LIVE</span>
+            </label>
+            <label class="flex items-center gap-1.5 cursor-pointer text-emerald-300 font-semibold">
+              <input id="autoCalToggle" type="checkbox" checked class="accent-emerald-500" />
+              <span>🧠 Auto-Calibra + ELO</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="flex flex-wrap justify-between items-center gap-2 text-[11px] text-slate-400 pt-1.5 border-t border-slate-800">
+          <span>Partite: <strong id="visibleCount" class="text-white">0</strong> • Top: <strong id="topPickCount" class="text-emerald-400">0</strong> • Presi: <strong id="hitCount" class="text-cyan-300">-</strong></span>
+          <div class="flex items-center gap-2">
+            <button id="refreshBtn" title="Aggiorna dati" class="text-cyan-400 font-semibold px-2 py-0.5 rounded hover:bg-slate-800">↻ Aggiorna</button>
+            <button id="toggleAllBtn" class="text-slate-300 font-semibold px-1.5 py-0.5 rounded hover:bg-slate-800">Comprimi</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="scheduleContainer" class="space-y-3"></section>
+    </div>
+
+    <div id="viewStorico" class="hidden space-y-3">
+      <section class="glass rounded-2xl p-3.5 space-y-3 border-cyan-500/30">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 class="text-sm font-bold text-white">📊 Storico 10 Anni, ELO &amp; Calibrazione</h2>
+            <p class="text-[11px] text-slate-400">Backtest cronologico senza leakage • Cache trimestrale IndexedDB</p>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <button id="btnScan1" onclick="scanSeason(365)" class="px-2.5 py-1.5 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 font-bold text-xs disabled:opacity-50">📥 1 Anno</button>
+            <button id="btnScan5" onclick="scanSeason(1825)" class="px-2.5 py-1.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs disabled:opacity-50">📥 5 Anni</button>
+            <button id="btnScan10" onclick="scanSeason(3650)" class="px-2.5 py-1.5 rounded-xl bg-emerald-500 text-slate-950 font-bold text-xs disabled:opacity-50">📥 10 Anni</button>
+            <button id="btnStopScan" onclick="stopScan()" class="hidden px-2.5 py-1.5 rounded-xl bg-rose-500 text-white font-bold text-xs">⏹️ Stop</button>
+            <button id="btnExportHist" onclick="exportHistory()" title="Esporta backup JSON" class="px-2.5 py-1.5 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 font-semibold text-xs disabled:opacity-50">💾</button>
+            <label title="Importa backup JSON" class="px-2.5 py-1.5 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 font-semibold text-xs cursor-pointer">
+              📂<input id="importHistInput" type="file" accept=".json" class="hidden" />
+            </label>
+            <button id="btnResetHist" onclick="resetHistory()" title="Svuota storico" class="px-2.5 py-1.5 rounded-xl bg-slate-800 text-rose-300 border border-slate-700 font-semibold text-xs disabled:opacity-50">🗑️</button>
+          </div>
+        </div>
+
+        <div id="histScanWrap" class="hidden space-y-1.5">
+          <div id="histScanStatus" class="text-[11px] text-cyan-300"></div>
+          <div id="histProgressWrap" class="hidden w-full h-1.5 bg-slate-900 rounded-full overflow-hidden">
+            <div id="histProgressBar" class="h-full bg-gradient-to-r from-emerald-500 to-cyan-400 transition-all duration-300" style="width:0%"></div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <input id="teamHistSearch" type="text" placeholder="Cerca squadra nello storico..."
+            class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+          <select id="minMatchesFilter" class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            <option value="1">Tutte (da 1+ partite)</option>
+            <option value="15" selected>Almeno 15 partite</option>
+            <option value="50">Almeno 50 partite</option>
+            <option value="100">Almeno 100 partite</option>
+            <option value="200">Almeno 200 partite</option>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">Match Verificati</div><div id="hTotal" class="text-sm font-extrabold text-white">0</div></div>
+          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">Esiti Presi</div><div id="hWinRate" class="text-sm font-extrabold text-emerald-400">-</div></div>
+          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400" title="Più basso è meglio (<0.20 ottimo)">Brier Score</div><div id="hBrier" class="text-sm font-extrabold text-cyan-400">-</div></div>
+          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">Over/Under 2.5</div><div id="hOuRate" class="text-sm font-extrabold text-fuchsia-300">-</div></div>
+        </div>
+
+        <div id="calibSummary" class="hidden rounded-xl bg-slate-950 border border-slate-800 p-2.5 space-y-2 text-[11px]"></div>
+      </section>
+      <section id="teamLeaderboard" class="space-y-2"></section>
+    </div>
+
+    <div id="viewDiario" class="hidden space-y-3">
+      <section class="glass rounded-2xl p-3.5 space-y-3 border-amber-500/30">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 class="text-sm font-bold text-white">💼 Diario Giocate &amp; ROI Reale</h2>
+            <p class="text-[11px] text-slate-400">Registra le tue puntate dal dettaglio partita o dalla schedina e monitora il profitto</p>
+          </div>
+          <div class="flex gap-1.5">
+            <button id="btnAutoSettle" class="px-2.5 py-1.5 rounded-xl bg-emerald-500 text-slate-950 font-bold text-xs disabled:opacity-50">🔄 Verifica Esiti</button>
+            <button id="btnClearDiario" class="px-2.5 py-1.5 rounded-xl bg-slate-800 text-rose-300 border border-slate-700 font-semibold text-xs">🗑️</button>
+          </div>
+        </div>
+        <div id="diarioStatus" class="hidden text-[11px] text-cyan-300"></div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">Giocate Chiuse</div><div id="dCount" class="text-sm font-extrabold text-white">0</div></div>
+          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">Win Rate</div><div id="dWinRate" class="text-sm font-extrabold text-cyan-300">-</div></div>
+          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">Profitto Netto</div><div id="dNetProfit" class="text-sm font-extrabold text-emerald-400">0.00u</div></div>
+          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">ROI Reale</div><div id="dRoi" class="text-sm font-extrabold text-amber-300">-</div></div>
+        </div>
+      </section>
+      <section id="betLogList" class="space-y-2"></section>
+    </div>
+  </main>
+
+  <div id="slipBar" class="fixed bottom-3 left-1/2 -translate-x-1/2 z-40 hidden w-[calc(100%-1.5rem)] max-w-2xl">
+    <div class="rounded-2xl bg-slate-900/95 backdrop-blur border border-emerald-500/40 shadow-xl shadow-black/60 px-3 py-2 flex items-center justify-between gap-2">
+      <div class="min-w-0">
+        <div class="text-xs font-extrabold text-white">🎟️ Schedina (<span id="slipCount">0</span> selezioni)</div>
+        <div class="text-[11px] text-slate-300">Prob. combinata: <strong id="slipProb" class="text-emerald-400">0%</strong> • Quota equa: <strong id="slipOdd" class="text-cyan-300">@1.00</strong></div>
+      </div>
+      <div class="flex items-center gap-1.5 shrink-0">
+        <button id="slipOpenBtn" class="px-3 py-1.5 rounded-xl bg-emerald-500 text-slate-950 text-xs font-bold">Sistemi / Vedi</button>
+        <button id="slipClearBtn" title="Svuota schedina" class="px-2.5 py-1.5 rounded-xl bg-slate-800 text-rose-300 text-xs font-bold">✕</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="detailModal" class="fixed inset-0 z-50 hidden items-end sm:items-center justify-center bg-black/80">
+    <div id="modalDialog" class="bg-slate-900 border-t sm:border border-slate-700 rounded-t-2xl sm:rounded-2xl max-w-xl w-full max-h-[88vh] overflow-y-auto">
+      <div class="sticky top-0 z-10 bg-slate-900 border-b border-slate-800 px-4 py-3 flex justify-between items-center">
+        <div>
+          <div id="modalLeague" class="text-[11px] font-semibold text-emerald-400"></div>
+          <h2 id="modalTitle" class="text-base font-bold text-white"></h2>
+        </div>
+        <button id="closeModalBtn" class="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700">✕</button>
+      </div>
+      <div id="modalBody" class="p-4 space-y-3"></div>
+    </div>
+  </div>
+
+  <script src="app1.js"></script>
+  <script src="app2.js"></script>
+  <script src="app3.js"></script>
+</body>
+</html>
