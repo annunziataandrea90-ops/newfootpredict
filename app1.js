@@ -598,3 +598,179 @@ function targetDateKey(offset) {
   const d = new Date(); d.setDate(d.getDate() + offset);
   return localDateKey(d);
 }
+
+function renderTeamLeaderboard() {
+  const raw = getTeamHist(), q = document.getElementById("teamHistSearch").value.trim().toLowerCase();
+  const minM = Number(document.getElementById("minMatchesFilter").value), all = Object.values(raw);
+  const tot = all.reduce((s, x) => s + x.tot, 0), hits = all.reduce((s, x) => s + x.hit, 0), ouHits = all.reduce((s, x) => s + x.ou, 0);
+
+  let uniqueM = 0, brierSum = 0, b1x2Sum = 0, b1x2Cnt = 0, bOuSum = 0, bOuCnt = 0;
+  const byCat = { "1X2": { n: 0, h: 0 }, "DC": { n: 0, h: 0 }, "GOALS": { n: 0, h: 0 } };
+  const bins = [
+    { label: "50–60%", min: 0.50, max: 0.60, n: 0, h: 0, pSum: 0 },
+    { label: "60–70%", min: 0.60, max: 0.70, n: 0, h: 0, pSum: 0 },
+    { label: "70–80%", min: 0.70, max: 0.80, n: 0, h: 0, pSum: 0 },
+    { label: "80%+", min: 0.80, max: 1.01, n: 0, h: 0, pSum: 0 }
+  ];
+
+  all.forEach(t => {
+    (t.m || []).forEach(x => {
+      if (x.h !== 1 || !Number.isFinite(x.pr)) return;
+      uniqueM++; brierSum += Math.pow(x.pr - x.ph, 2);
+      if (Number.isFinite(x.b1x2)) { b1x2Sum += x.b1x2; b1x2Cnt++; }
+      if (Number.isFinite(x.bOu)) { bOuSum += x.bOu; bOuCnt++; }
+      if (byCat[x.cat]) { byCat[x.cat].n++; byCat[x.cat].h += x.ph; }
+      const b = bins.find(bn => x.pr >= bn.min && x.pr < bn.max);
+      if (b) { b.n++; b.h += x.ph; b.pSum += x.pr; }
+    });
+  });
+
+  document.getElementById("hTotal").textContent = (uniqueM || Math.round(tot / 2)).toLocaleString("it-IT");
+  document.getElementById("hWinRate").textContent = tot ? `${Math.round(hits / tot * 100)}%` : "-";
+  document.getElementById("hBrier").textContent = uniqueM ? (brierSum / uniqueM).toFixed(3) : "-";
+  document.getElementById("hOuRate").textContent = tot ? `${Math.round(ouHits / tot * 100)}%` : "-";
+
+  const calBox = document.getElementById("calibSummary");
+  if (uniqueM > 0) {
+    calBox.classList.remove("hidden");
+    const fmtCat = (label, obj) => obj.n ? `<span class="px-2 py-0.5 rounded bg-slate-900 border border-slate-800">${label}: <strong class="text-white">${Math.round(obj.h / obj.n * 100)}%</strong> <span class="text-slate-500">(${obj.n.toLocaleString("it-IT")})</span></span>` : "";
+    const marketBriers = (b1x2Cnt || bOuCnt)
+      ? `<div class="flex flex-wrap gap-2 text-[10px] text-slate-400 pt-1 border-t border-slate-800/80">
+          ${b1x2Cnt ? `<span title="3-esiti (casuale = 0.667, buono < 0.60)">Brier 1X2: <strong class="text-cyan-300">${(b1x2Sum / b1x2Cnt).toFixed(3)}</strong></span>` : ""}
+          ${bOuCnt ? `<span title="Binario (casuale = 0.250, buono < 0.240)">Brier O/U 2.5: <strong class="text-fuchsia-300">${(bOuSum / bOuCnt).toFixed(3)}</strong></span>` : ""}
+        </div>` : "";
+    calBox.innerHTML = `
+      <div class="flex flex-wrap items-center justify-between gap-1.5">
+        <span class="font-bold text-slate-300">🎯 Resa per Mercato:</span>
+        <div class="flex flex-wrap gap-1.5">${fmtCat("1X2", byCat["1X2"])}${fmtCat("Doppia Chance", byCat["DC"])}${fmtCat("Gol/O-U", byCat["GOALS"])}</div>
+      </div>
+      <div class="grid grid-cols-4 gap-1.5 pt-1 border-t border-slate-800/80 text-center">
+        ${bins.map(b => {
+          const real = b.n ? Math.round((b.h / b.n) * 100) + "%" : "-";
+          const exp = b.n ? Math.round((b.pSum / b.n) * 100) + "%" : "-";
+          return `<div class="p-1.5 rounded-lg bg-slate-900/70"><div class="text-[9px] text-slate-400">Prev. ${b.label}</div><div class="font-bold text-emerald-400">${real} <span class="text-[9px] text-slate-500 font-normal">vs ${exp}</span></div></div>`;
+        }).join("")}
+      </div>${marketBriers}`;
+  } else {
+    calBox.classList.add("hidden");
+  }
+
+  const list = all.filter(t => t.tot >= minM && (!q || t.n.toLowerCase().includes(q)))
+    .map(t => ({ ...t, rate: t.hit / t.tot })).sort((a, b) => b.rate - a.rate || b.tot - a.tot);
+
+  const box = document.getElementById("teamLeaderboard");
+  if (!all.length) {
+    box.innerHTML = `<div class="glass rounded-2xl p-6 text-center text-xs text-slate-400">Premi <strong>"📥 1 Anno"</strong>, <strong>"📥 5 Anni"</strong> o <strong>"📥 10 Anni"</strong> per generare storico, rating ELO e calibrazione reale!</div>`;
+    return;
+  }
+  if (!list.length) {
+    box.innerHTML = `<div class="glass rounded-2xl p-6 text-center text-xs text-slate-400">Nessuna squadra trovata.</div>`;
+    return;
+  }
+
+  box.innerHTML = list.slice(0, 250).map((t, idx) => {
+    const pct = Math.round(t.rate * 100), ouPct = Math.round((t.ou / t.tot) * 100);
+    const cls = pct >= 68 ? "border-emerald-500/35 text-emerald-400" : pct >= 52 ? "border-amber-500/35 text-amber-300" : "border-rose-500/35 text-rose-400";
+    const barCls = pct >= 68 ? "bg-emerald-500" : pct >= 52 ? "bg-amber-400" : "bg-rose-500";
+    return `<div data-tid="${esc(t.id)}" class="team-card glass rounded-2xl p-3 space-y-2 border ${cls.split(' ')[0]} cursor-pointer hover:bg-slate-800/50 transition-colors">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="text-xs font-bold text-slate-500 w-7 shrink-0">#${idx + 1}</span>
+          <div class="min-w-0">
+            <div class="text-xs sm:text-sm font-bold text-white truncate">${esc(t.n)} <span class="text-[10px] font-normal text-cyan-300">ELO ${Math.round(t.elo || 1500)}</span></div>
+            <div class="text-[10px] text-slate-400">${t.hit}/${t.tot} presi • O/U ${ouPct}%</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2 shrink-0"><span class="text-sm font-extrabold ${cls.split(' ')[1]}">${pct}%</span><span class="text-slate-500 text-xs">▸</span></div>
+      </div>
+      <div class="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden"><div class="h-full ${barCls}" style="width:${pct}%"></div></div>
+    </div>`;
+  }).join("");
+}
+
+function openTeamModal(tid) {
+  const t = getTeamHist()[tid];
+  if (!t) return;
+  currentModalToken++;
+  const pct = Math.round((t.hit / t.tot) * 100);
+  document.getElementById("modalLeague").textContent = `Storico • ${t.hit}/${t.tot} presi (${pct}%) • ELO ${Math.round(t.elo || 1500)}`;
+  document.getElementById("modalTitle").textContent = t.n;
+  const byCompYear = {};
+  t.m.slice().reverse().forEach(x => {
+    const yr = (x.d || "").slice(0, 4);
+    const key = `${yr} • ${x.f} ${x.c} (${x.k})`;
+    if (!byCompYear[key]) byCompYear[key] = [];
+    byCompYear[key].push(x);
+  });
+  document.getElementById("modalBody").innerHTML = Object.entries(byCompYear).map(([label, list], i) => {
+    const cHits = list.filter(x => x.ph).length;
+    return `<details ${i < 3 ? "open" : ""} class="rounded-xl bg-slate-950 border border-slate-800 overflow-hidden">
+      <summary class="px-3 py-2 bg-slate-900 border-b border-slate-800 flex justify-between items-center cursor-pointer list-none">
+        <span class="text-xs font-bold text-white">${esc(label)}</span>
+        <span class="text-[11px] font-semibold text-emerald-400">${cHits}/${list.length} (${Math.round(cHits / list.length * 100)}%) ▾</span>
+      </summary>
+      <div class="divide-y divide-slate-800/70">
+        ${list.map(x => `<div class="px-3 py-2 flex items-center justify-between gap-2 text-xs">
+          <div class="min-w-0"><div class="text-[10px] text-slate-500">${esc(x.d)}</div><div class="text-slate-200 font-medium truncate">${esc(x.t)}</div></div>
+          <div class="flex items-center gap-2 shrink-0">
+            <span class="px-2 py-0.5 rounded bg-slate-800 font-bold text-white">${esc(x.s)}</span>
+            <div class="text-right">
+              <div class="text-[11px] font-bold ${x.ph ? 'text-emerald-400' : 'text-rose-400'}">${esc(x.p)} ${x.ph ? '✅' : '❌'}</div>
+              <div class="text-[9px] text-slate-400">${esc(x.o)} ${x.oh ? '✅' : '❌'}</div>
+            </div>
+          </div>
+        </div>`).join("")}
+      </div>
+    </details>`;
+  }).join("");
+  document.body.classList.add("overflow-hidden");
+  const mod = document.getElementById("detailModal");
+  mod.classList.remove("hidden"); mod.classList.add("flex");
+}
+
+function renderDiario() {
+  const closed = BET_LOG.filter(b => b.status === "won" || b.status === "lost");
+  const won = closed.filter(b => b.status === "won").length;
+  const staked = closed.reduce((s, b) => s + b.stake, 0);
+  const net = closed.reduce((s, b) => s + (b.status === "won" ? b.stake * (b.odd - 1) : -b.stake), 0);
+
+  document.getElementById("dCount").textContent = `${closed.length}/${BET_LOG.length}`;
+  document.getElementById("dWinRate").textContent = closed.length ? `${Math.round(won / closed.length * 100)}%` : "-";
+  const netEl = document.getElementById("dNetProfit");
+  netEl.textContent = `${net >= 0 ? "+" : ""}${net.toFixed(2)}u`;
+  netEl.className = `text-sm font-extrabold ${net >= 0 ? "text-emerald-400" : "text-rose-400"}`;
+  document.getElementById("dRoi").textContent = staked > 0 ? `${((net / staked) * 100).toFixed(1)}%` : "-";
+
+  const box = document.getElementById("betLogList");
+  if (!BET_LOG.length) {
+    box.innerHTML = `<div class="glass rounded-2xl p-6 text-center text-xs text-slate-400">Nessuna giocata registrata. Tocca una partita nel palinsesto, inserisci la quota e premi <strong>"💼 Registra"</strong>!</div>`;
+    return;
+  }
+
+  box.innerHTML = BET_LOG.slice().reverse().map(b => {
+    const netWon = b.stake * (b.odd - 1);
+    const stBadge = b.status === "won"
+      ? (netWon >= 0
+          ? `<span class="text-emerald-400 font-bold">✅ VINTA (+${netWon.toFixed(2)}u)</span>`
+          : `<span class="text-amber-300 font-bold">🟡 PARZIALE (${netWon.toFixed(2)}u)</span>`)
+      : b.status === "lost" ? `<span class="text-rose-400 font-bold">❌ PERSA (-${b.stake.toFixed(2)}u)</span>`
+      : b.status === "void" ? `<span class="text-slate-400 font-bold">↩️ RIMBORSATA</span>`
+      : `<span class="text-amber-300 font-bold">⏳ IN ATTESA</span>`;
+    return `<div class="glass rounded-2xl p-3 space-y-2 text-xs">
+      <div class="flex justify-between items-start gap-2">
+        <div class="min-w-0">
+          <div class="text-[10px] text-slate-400">${esc(b.date)} • ${esc(b.league)}</div>
+          <div class="font-bold text-white truncate">${esc(b.match)}</div>
+          <div class="text-[11px] text-cyan-300 font-semibold">${esc(b.code)} @${b.odd.toFixed(2)} • Puntata: ${b.stake}u</div>
+        </div>
+        <div class="text-right shrink-0">${stBadge}</div>
+      </div>
+      <div class="flex flex-wrap gap-1.5 pt-1.5 border-t border-slate-800">
+        <button data-bet-set="${esc(b.id)}:won" class="px-2 py-1 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">✅ Vinta</button>
+        <button data-bet-set="${esc(b.id)}:lost" class="px-2 py-1 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px] font-bold">❌ Persa</button>
+        <button data-bet-set="${esc(b.id)}:void" class="px-2 py-1 rounded bg-slate-800 text-slate-300 text-[10px] font-bold">↩️ Rimb.</button>
+        <button data-bet-del="${esc(b.id)}" class="ml-auto px-2 py-1 rounded bg-slate-800 text-rose-300 text-[10px]">🗑️</button>
+      </div>
+    </div>`;
+  }).join("");
+}
