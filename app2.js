@@ -104,6 +104,7 @@ async function fetchAFForTopVisible() {
   if (!apiKey) { openApiKeysModal(); return; }
   const btn = document.getElementById("afBatchBtn");
   btn.disabled = true;
+  let partialErr = "";
   try {
     const q = st.search.trim().toLowerCase();
     const filtered = [];
@@ -120,44 +121,56 @@ async function fetchAFForTopVisible() {
       if (st.sort === "ev") return (b.prediction.bestValue?.ev ?? -1) - (a.prediction.bestValue?.ev ?? -1);
       return b.prediction.rankScore - a.prediction.rankScore;
     });
-    const targets = filtered.slice(0, 20);
-    if (!targets.length) {
+    const topPool = filtered.slice(0, 20);
+    if (!topPool.length) {
       updateApiStatusBars(null, "Nessun match PRE/LIVE visibile coi filtri attuali.");
       return;
     }
 
-    const datesNeeded = [...new Set(targets.map(m => localDateKey(new Date(m.startTs || Date.now()))))];
+    const datesNeeded = [...new Set(topPool.map(m => localDateKey(new Date(m.startTs || Date.now()))))];
     const dateLists = {};
     for (const dIso of datesNeeded) {
-      updateApiStatusBars(null, `🔬 Mappo calendario ${dIso} (max 1 req)...`);
+      updateApiStatusBars(null, `🔬 Mappo calendario ${dIso}...`);
       const res = await AFProvider.getFixturesByDate(dIso, apiKey, false);
       dateLists[dIso] = res.list;
     }
 
+    const isPaid = AFProvider.isPaidPlan();
+    const maxPerClick = isPaid ? 20 : 4;
     const afMatchCache = AFProvider.loadMatchCache();
     const idsToFetch = [];
-    targets.forEach(m => {
+
+    for (const m of topPool) {
       const dIso = localDateKey(new Date(m.startTs || Date.now()));
       const fx = findAFFixtureForMatch(m, dateLists[dIso]);
       if (fx) {
         m.afId = fx.id;
         const hit = afMatchCache[String(fx.id)];
-        if (!hit || (Date.now() - hit.ts) >= AF_MATCH_TTL || (m.stateType === "in" && (Date.now() - hit.ts) >= 3 * 60 * 1000)) {
-          if (!idsToFetch.includes(fx.id)) idsToFetch.push(fx.id);
+        const isFresh = hit && (Date.now() - hit.ts) < AF_MATCH_TTL && !(m.stateType === "in" && (Date.now() - hit.ts) >= 3 * 60 * 1000);
+        if (!isFresh && !idsToFetch.includes(fx.id)) {
+          idsToFetch.push(fx.id);
+          if (idsToFetch.length >= maxPerClick) break;
         }
       }
-    });
+    }
 
     if (idsToFetch.length) {
-      updateApiStatusBars(null, `🔬 Scarico formazioni & infortuni per ${idsToFetch.length} match (solo 2 req batch!)...`);
-      await AFProvider.fetchDetailsBatch(idsToFetch, apiKey);
+      updateApiStatusBars(null, `🔬 Scarico ${idsToFetch.length} match top (${isPaid ? "batch" : "singoli per piano Free"})...`);
+      try {
+        await AFProvider.fetchDetailsBatch(idsToFetch, apiKey);
+      } catch (err) {
+        partialErr = err?.message || "limite richieste/minuto";
+      }
     }
 
     const attached = attachAFCacheToLeagues(LEAGUES);
     recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule();
     const quotaAf = AFProvider.getQuota();
     const qTxt = quotaAf?.remaining != null ? ` • Rimaste oggi: ${quotaAf.remaining}/${quotaAf.limit || 100} req` : "";
-    updateApiStatusBars(null, `✅ Formazioni/Infortuni aggiornati su ${attached} partite${qTxt}`);
+    const msg = partialErr
+      ? `⚠️ Scaricati parziali (${attached} match attivi • ${partialErr})${qTxt}`
+      : `✅ Formazioni/Infortuni attivi su ${attached} match${!isPaid && idsToFetch.length === 4 ? " (riclicca tra 60s per altri 4)" : ""}${qTxt}`;
+    updateApiStatusBars(null, msg);
   } catch (err) {
     updateApiStatusBars(null, `❌ API-Football: ${err?.message || "errore connessione"}`);
   } finally {
