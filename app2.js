@@ -9,35 +9,55 @@ function recalcAllPredictions() {
   LEAGUES.forEach(l => l.matches.forEach(m => { m.prediction = calcPred(m); }));
 }
 
-function updateOddsStatusBar(customMsg = null) {
-  const el = document.getElementById("oddsStatusLine");
+function updateApiStatusBars(customOdds = null, customAf = null) {
+  const oddsEl = document.getElementById("oddsStatusLine");
+  const afEl = document.getElementById("afStatusLine");
   const keyBtn = document.getElementById("oddsKeyBtn");
-  const hasKey = Boolean(OddsProvider.getKey());
-  if (keyBtn) keyBtn.textContent = hasKey ? "🔑 OK" : "🔑 Key";
-  if (!el) return;
-  if (customMsg) {
-    el.classList.remove("hidden");
-    el.textContent = customMsg;
-    return;
+  const hasOdds = Boolean(OddsProvider.getKey()), hasAf = Boolean(AFProvider.getKey());
+  if (keyBtn) {
+    keyBtn.textContent = (hasOdds && hasAf) ? "🔑 2/2" : (hasOdds || hasAf) ? "🔑 1/2" : "🔑 Keys";
   }
-  const matched = LEAGUES.reduce((s, l) => s + l.matches.filter(m => m.odds).length, 0);
-  const quota = OddsProvider.getQuota();
-  if (matched > 0) {
-    const qTxt = quota?.remaining != null ? ` • Crediti rimasti: ${quota.remaining}` : "";
-    el.classList.remove("hidden");
-    el.textContent = `💰 Quote reali attive su ${matched} partite${qTxt}`;
-  } else {
-    el.classList.add("hidden");
+
+  if (oddsEl) {
+    if (customOdds) {
+      oddsEl.classList.remove("hidden"); oddsEl.textContent = customOdds;
+    } else {
+      const matched = LEAGUES.reduce((s, l) => s + l.matches.filter(m => m.odds).length, 0);
+      const quota = OddsProvider.getQuota();
+      if (matched > 0) {
+        const qTxt = quota?.remaining != null ? ` • Crediti rimasti: ${quota.remaining}` : "";
+        oddsEl.classList.remove("hidden");
+        oddsEl.textContent = `💰 Quote reali attive su ${matched} partite${qTxt}`;
+      } else {
+        oddsEl.classList.add("hidden");
+      }
+    }
+  }
+
+  if (afEl) {
+    if (customAf) {
+      afEl.classList.remove("hidden"); afEl.textContent = customAf;
+    } else {
+      const matchedAf = LEAGUES.reduce((s, l) => s + l.matches.filter(m => m.af).length, 0);
+      const quotaAf = AFProvider.getQuota();
+      if (matchedAf > 0) {
+        const qTxt = quotaAf?.remaining != null ? ` • Rimaste oggi: ${quotaAf.remaining}/${quotaAf.limit || 100} req` : "";
+        afEl.classList.remove("hidden");
+        afEl.textContent = `🔬 Formazioni/Infortuni API-Football su ${matchedAf} partite${qTxt}`;
+      } else {
+        afEl.classList.add("hidden");
+      }
+    }
   }
 }
 
 async function fetchOddsForCurrentDay(force = false) {
   const apiKey = OddsProvider.getKey();
-  if (!apiKey) { openOddsKeyModal(); return; }
+  if (!apiKey) { openApiKeysModal(); return; }
   const btn = document.getElementById("oddsFetchBtn");
   btn.disabled = true;
   try {
-    updateOddsStatusBar("🔎 Controllo campionati attivi (0 crediti)...");
+    updateApiStatusBars("🔎 Controllo campionati attivi (0 crediti)...", null);
     const activeSports = await OddsProvider.fetchActiveSports(apiKey);
     const targetLeagues = LEAGUES.filter(l =>
       ODDS_SPORT_MAP[l.id] &&
@@ -45,43 +65,118 @@ async function fetchOddsForCurrentDay(force = false) {
       l.matches.some(m => m.stateType === "pre" || m.stateType === "in")
     );
     if (!targetLeagues.length) {
-      updateOddsStatusBar("Nessun campionato con partite aperte trovato per le quote.");
+      updateApiStatusBars("Nessun campionato con partite aperte trovato per le quote.", null);
       return;
     }
 
     let done = 0, usedCache = 0, errMsg = "";
     for (const l of targetLeagues) {
       const sportKey = ODDS_SPORT_MAP[l.id];
-      updateOddsStatusBar(`💰 Scarico quote ${++done}/${targetLeagues.length} (${l.name})...`);
+      updateApiStatusBars(`💰 Scarico quote ${++done}/${targetLeagues.length} (${l.name})...`, null);
       try {
         const res = await OddsProvider.fetchLeagueOdds(sportKey, apiKey, force);
         if (res.fromCache) usedCache++;
       } catch (err) {
-        errMsg = err?.status === 401 ? "API Key non valida (401)"
+        errMsg = err?.status === 401 ? "API Key Quote non valida (401)"
           : err?.status === 429 ? "Limite richieste/crediti raggiunto (429)"
           : (err?.message || "Errore rete");
         if (err?.status === 401 || err?.status === 429) break;
       }
     }
 
-    if (errMsg) {
-      updateOddsStatusBar(`❌ ${errMsg}`);
-      return;
-    }
+    if (errMsg) { updateApiStatusBars(`❌ ${errMsg}`, null); return; }
 
     const matched = attachOddsToLeagues(LEAGUES);
-    recalcAllPredictions();
-    syncSlipFromLeagues();
-    renderSchedule();
+    recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule();
     const quota = OddsProvider.getQuota();
     const qTxt = quota?.remaining != null ? ` • Crediti rimasti: ${quota.remaining}` : "";
     const cacheTxt = usedCache ? ` (${usedCache} da cache)` : "";
-    updateOddsStatusBar(`✅ Quote abbinate su ${matched} partite${cacheTxt}${qTxt}`);
+    updateApiStatusBars(`✅ Quote abbinate su ${matched} partite${cacheTxt}${qTxt}`, null);
   } catch (err) {
-    updateOddsStatusBar(`❌ Errore quote: ${err?.status === 401 ? "API Key non valida" : (err?.message || "connessione fallita")}`);
+    updateApiStatusBars(`❌ Errore quote: ${err?.status === 401 ? "API Key non valida" : (err?.message || "connessione fallita")}`, null);
   } finally {
     btn.disabled = false;
   }
+}
+
+async function fetchAFForTopVisible() {
+  const apiKey = AFProvider.getKey();
+  if (!apiKey) { openApiKeysModal(); return; }
+  const btn = document.getElementById("afBatchBtn");
+  btn.disabled = true;
+  try {
+    const q = st.search.trim().toLowerCase();
+    const filtered = [];
+    LEAGUES.forEach(l => l.matches.forEach(m => {
+      if (m.stateType !== "pre" && m.stateType !== "in") return;
+      if (m.prediction.confidence < st.minConf) return;
+      if (st.market !== "all" && m.prediction.bestPick.cat !== st.market) return;
+      if (st.onlyValue && !m.prediction.bestValue) return;
+      if (q && !`${l.name} ${l.kind} ${m.home} ${m.away}`.toLowerCase().includes(q)) return;
+      filtered.push(m);
+    }));
+
+    filtered.sort((a, b) => {
+      if (st.sort === "ev") return (b.prediction.bestValue?.ev ?? -1) - (a.prediction.bestValue?.ev ?? -1);
+      return b.prediction.rankScore - a.prediction.rankScore;
+    });
+    const targets = filtered.slice(0, 20);
+    if (!targets.length) {
+      updateApiStatusBars(null, "Nessun match PRE/LIVE visibile coi filtri attuali.");
+      return;
+    }
+
+    const datesNeeded = [...new Set(targets.map(m => localDateKey(new Date(m.startTs || Date.now()))))];
+    const dateLists = {};
+    for (const dIso of datesNeeded) {
+      updateApiStatusBars(null, `🔬 Mappo calendario ${dIso} (max 1 req)...`);
+      const res = await AFProvider.getFixturesByDate(dIso, apiKey, false);
+      dateLists[dIso] = res.list;
+    }
+
+    const afMatchCache = AFProvider.loadMatchCache();
+    const idsToFetch = [];
+    targets.forEach(m => {
+      const dIso = localDateKey(new Date(m.startTs || Date.now()));
+      const fx = findAFFixtureForMatch(m, dateLists[dIso]);
+      if (fx) {
+        m.afId = fx.id;
+        const hit = afMatchCache[String(fx.id)];
+        if (!hit || (Date.now() - hit.ts) >= AF_MATCH_TTL || (m.stateType === "in" && (Date.now() - hit.ts) >= 3 * 60 * 1000)) {
+          if (!idsToFetch.includes(fx.id)) idsToFetch.push(fx.id);
+        }
+      }
+    });
+
+    if (idsToFetch.length) {
+      updateApiStatusBars(null, `🔬 Scarico formazioni & infortuni per ${idsToFetch.length} match (solo 2 req batch!)...`);
+      await AFProvider.fetchDetailsBatch(idsToFetch, apiKey);
+    }
+
+    const attached = attachAFCacheToLeagues(LEAGUES);
+    recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule();
+    const quotaAf = AFProvider.getQuota();
+    const qTxt = quotaAf?.remaining != null ? ` • Rimaste oggi: ${quotaAf.remaining}/${quotaAf.limit || 100} req` : "";
+    updateApiStatusBars(null, `✅ Formazioni/Infortuni aggiornati su ${attached} partite${qTxt}`);
+  } catch (err) {
+    updateApiStatusBars(null, `❌ API-Football: ${err?.message || "errore connessione"}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function fetchAFForSingleMatch(m) {
+  const apiKey = AFProvider.getKey();
+  if (!apiKey) { openApiKeysModal(); return false; }
+  const dateIso = localDateKey(new Date(m.startTs || Date.now()));
+  const res = await AFProvider.getFixturesByDate(dateIso, apiKey, false);
+  const fx = findAFFixtureForMatch(m, res.list);
+  if (!fx) throw new Error("Match non trovato su API-Football per questa data.");
+  m.afId = fx.id;
+  await AFProvider.fetchDetailsBatch([fx.id], apiKey);
+  attachAFCacheToLeagues(LEAGUES);
+  recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule(); updateApiStatusBars();
+  return true;
 }
 
 async function fetchScoreboardDay(slug, dp, diag) {
@@ -107,13 +202,14 @@ async function loadDay(offset, force = false) {
     LEAGUES = cached.leagues;
     lastDiag = cached.diagMsg || "";
     attachOddsToLeagues(LEAGUES);
+    attachAFCacheToLeagues(LEAGUES);
     recalcAllPredictions();
     const tot = LEAGUES.reduce((s, l) => s + l.matches.length, 0);
     badge.textContent = "LIVE REALE";
     badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
     sub.textContent = `${tot} partite (${dp.slice(6,8)}/${dp.slice(4,6)}) • Cache veloce`;
     syncSlipFromLeagues();
-    updateOddsStatusBar();
+    updateApiStatusBars();
     renderSchedule();
     return;
   }
@@ -247,6 +343,7 @@ async function loadDay(offset, force = false) {
     });
 
     attachOddsToLeagues(LEAGUES);
+    attachAFCacheToLeagues(LEAGUES);
     recalcAllPredictions();
 
     const tot = LEAGUES.reduce((s, l) => s + l.matches.length, 0);
@@ -261,7 +358,7 @@ async function loadDay(offset, force = false) {
     badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
     sub.textContent = `${tot} partite (${dp.slice(6,8)}/${dp.slice(4,6)}) • Agg. ${nowStr}`;
     syncSlipFromLeagues();
-    updateOddsStatusBar();
+    updateApiStatusBars();
     renderSchedule();
   } catch (err) {
     console.error("Errore loadDay:", err);
