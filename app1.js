@@ -1,5 +1,4 @@
 const HIST_KEY = "fp_team_hist_10y";
-const CAL_KEY = "fp_cal_params_v1";
 const LEGACY_HIST_KEY = "fp_team_hist_9m";
 const STANDINGS_KEY = "fp_standings_cache_v2";
 const BET_KEY = "fp_bet_log_v1";
@@ -64,10 +63,9 @@ const ODDS_SPORT_MAP = {
 
 const AM_LEAGUES = new Set(["bra.1", "arg.1", "usa.1"]);
 const Q_PREFIX = "fp_q4_" + COMPS.length + "_";
-const MONTH_PREFIX = "fp_m5_" + COMPS.length + "_";
+const MONTH_PREFIX = "fp_m4_" + COMPS.length + "_";
 
 let TEAM_HIST_CACHE = {};
-let CAL_PARAMS = null;
 let standingsCache = {};
 let BET_LOG = [];
 const GLOBAL_TEAM_STATS = {};
@@ -204,11 +202,12 @@ function loadSlip() {
 }
 
 async function initStorage() {
+  await Promise.all([v13Load(),v13LoadSnapshots()]); v13Status();
   loadSlip();
   renderSlipBar();
   try {
-    const [hist10y, hist9m, calIdb, stdIdb, betIdb] = await Promise.all([
-      idbGet(HIST_KEY), idbGet(LEGACY_HIST_KEY), idbGet(CAL_KEY), idbGet(STANDINGS_KEY), idbGet(BET_KEY)
+    const [hist10y, hist9m, stdIdb, betIdb] = await Promise.all([
+      idbGet(HIST_KEY), idbGet(LEGACY_HIST_KEY), idbGet(STANDINGS_KEY), idbGet(BET_KEY)
     ]);
     if (hist10y && typeof hist10y === "object") {
       TEAM_HIST_CACHE = sanitizeTeamHist(hist10y);
@@ -221,9 +220,6 @@ async function initStorage() {
         TEAM_HIST_CACHE = sanitizeTeamHist(JSON.parse(legacy));
         await idbSet(HIST_KEY, TEAM_HIST_CACHE);
       }
-    }
-    if (calIdb && typeof calIdb === "object" && Number.isFinite(calIdb.temp1X2)) {
-      CAL_PARAMS = calIdb;
     }
     if (stdIdb && typeof stdIdb === "object") {
       const now = Date.now();
@@ -247,16 +243,6 @@ async function saveTeamHist(data) {
   catch { try { localStorage.setItem(HIST_KEY, JSON.stringify(TEAM_HIST_CACHE)); } catch {} }
 }
 
-async function saveCalParams(params) {
-  CAL_PARAMS = params && Number.isFinite(params.temp1X2) ? params : null;
-  try {
-    if (CAL_PARAMS) await idbSet(CAL_KEY, CAL_PARAMS);
-    else await idbDel(CAL_KEY);
-  } catch {}
-}
-
-const getCalParams = () => CAL_PARAMS;
-
 async function saveBetLog() {
   try { await idbSet(BET_KEY, BET_LOG); } catch {}
 }
@@ -267,10 +253,8 @@ async function persistStandingsCache() {
 
 async function clearTeamHist() {
   TEAM_HIST_CACHE = {};
-  CAL_PARAMS = null;
   try {
     await idbDel(HIST_KEY);
-    await idbDel(CAL_KEY);
     await idbDel(LEGACY_HIST_KEY);
     await idbDelByPrefix("fp_m");
     await idbDelByPrefix("fp_q");
@@ -377,7 +361,7 @@ function normTeamName(name) {
   const cleaned = String(name || "")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\b(fc|cf|ac|as|ss|ssc|us|sc|afc|rc|cd|ud|fk|sk|sv|vfb|tsg|fsv|rb|1|club|calcio|hotspur|wanderers|de|del|di|da|do|la|le|les|los|el)\b/g, " ")
+    .replace(/\b(fc|cf|ac|as|ss|ssc|us|sc|afc|rc|cd|ud|fk|sk|sv|vfb|tsg|fsv|rb|1|club|calcio|hotspur|wanderers)\b/g, " ")
     .replace(/\s+/g, " ").trim();
   return TEAM_ALIASES[cleaned] || TEAM_ALIASES[String(name || "").toLowerCase().trim()] || cleaned;
 }
@@ -386,34 +370,13 @@ function teamSimScore(a, b) {
   const na = normTeamName(a), nb = normTeamName(b);
   if (!na || !nb) return 0;
   if (na === nb) return 1;
+  if (na.includes(nb) || nb.includes(na)) return 0.9;
   const ta = new Set(na.split(" ").filter(x => x.length >= 2));
   const tb = new Set(nb.split(" ").filter(x => x.length >= 2));
   if (!ta.size || !tb.size) return 0;
   let inter = 0;
   ta.forEach(t => { if (tb.has(t)) inter++; });
-  const minTokens = Math.min(ta.size, tb.size);
-  if (inter === minTokens && Math.abs(ta.size - tb.size) <= 1 && Math.min(na.length, nb.length) >= 5) {
-    return 0.88;
-  }
   return inter / Math.max(ta.size, tb.size);
-}
-
-// Power method de-vig: corregge il favorite-longshot bias rispetto alla normalizzazione lineare.
-function solvePowerProbs(oddsArr) {
-  const invs = oddsArr.map(o => 1 / Math.max(1.01, Number(o)));
-  const sumInv = invs.reduce((a, b) => a + b, 0);
-  if (sumInv <= 1.0001) return invs.map(x => x / sumInv);
-  let lo = 1.0, hi = 3.0;
-  for (let it = 0; it < 28; it++) {
-    const mid = (lo + hi) * 0.5;
-    let s = 0;
-    for (let i = 0; i < invs.length; i++) s += Math.pow(invs[i], mid);
-    if (s > 1) lo = mid; else hi = mid;
-  }
-  const k = (lo + hi) * 0.5;
-  const raw = invs.map(x => Math.pow(x, k));
-  const norm = raw.reduce((a, b) => a + b, 0);
-  return raw.map(x => x / norm);
 }
 
 const OddsProvider = {
@@ -499,8 +462,8 @@ function extractOddsData(ev) {
         let o1 = null, ox = null, o2 = null;
         (mk.outcomes || []).forEach(out => {
           if (out.name === "Draw") ox = Number(out.price);
-          else if (teamSimScore(out.name, ev.home_team) >= 0.72) o1 = Number(out.price);
-          else if (teamSimScore(out.name, ev.away_team) >= 0.72) o2 = Number(out.price);
+          else if (teamSimScore(out.name, ev.home_team) >= 0.7) o1 = Number(out.price);
+          else if (teamSimScore(out.name, ev.away_team) >= 0.7) o2 = Number(out.price);
         });
         if (o1 > 1 && ox > 1 && o2 > 1) {
           updBest("1", o1, title); updBest("X", ox, title); updBest("2", o2, title);
@@ -527,16 +490,16 @@ function extractOddsData(ev) {
 
   if (!Object.keys(best).length) return null;
 
-  let mktP1 = null, mktPX = null, mktP2 = null, sharpSrc = null, isTrueSharp = false;
+  let mktP1 = null, mktPX = null, mktP2 = null, sharpSrc = null;
   if (sharpH2H) {
-    [mktP1, mktPX, mktP2] = solvePowerProbs([sharpH2H.o1, sharpH2H.ox, sharpH2H.o2]);
+    const inv = 1 / sharpH2H.o1 + 1 / sharpH2H.ox + 1 / sharpH2H.o2;
+    mktP1 = (1 / sharpH2H.o1) / inv; mktPX = (1 / sharpH2H.ox) / inv; mktP2 = (1 / sharpH2H.o2) / inv;
     sharpSrc = sharpH2H.key === "pinnacle" ? "Pinnacle" : "Betfair Ex";
-    isTrueSharp = true;
   } else if (allH2H.length) {
     let s1 = 0, sx = 0, s2 = 0;
     allH2H.forEach(x => {
-      const [p1, px, p2] = solvePowerProbs([x.o1, x.ox, x.o2]);
-      s1 += p1; sx += px; s2 += p2;
+      const inv = 1 / x.o1 + 1 / x.ox + 1 / x.o2;
+      s1 += (1 / x.o1) / inv; sx += (1 / x.ox) / inv; s2 += (1 / x.o2) / inv;
     });
     mktP1 = s1 / allH2H.length; mktPX = sx / allH2H.length; mktP2 = s2 / allH2H.length;
     sharpSrc = `Media ${allH2H.length} book`;
@@ -544,17 +507,18 @@ function extractOddsData(ev) {
 
   let mktPO = null, mktPU = null;
   if (sharpTot) {
-    [mktPO, mktPU] = solvePowerProbs([sharpTot.oO, sharpTot.oU]);
+    const inv = 1 / sharpTot.oO + 1 / sharpTot.oU;
+    mktPO = (1 / sharpTot.oO) / inv; mktPU = (1 / sharpTot.oU) / inv;
   } else if (allTot.length) {
     let sO = 0, sU = 0;
     allTot.forEach(x => {
-      const [pO, pU] = solvePowerProbs([x.oO, x.oU]);
-      sO += pO; sU += pU;
+      const inv = 1 / x.oO + 1 / x.oU;
+      sO += (1 / x.oO) / inv; sU += (1 / x.oU) / inv;
     });
     mktPO = sO / allTot.length; mktPU = sU / allTot.length;
   }
 
-  return { best, mktP1, mktPX, mktP2, mktPO, mktPU, sharpSrc, isTrueSharp, booksCount: books.length };
+  return { best, mktP1, mktPX, mktP2, mktPO, mktPU, sharpSrc, booksCount: books.length };
 }
 
 function attachOddsToLeagues(leagues) {
@@ -681,39 +645,16 @@ const AFProvider = {
   async fetchDetailsBatch(fixtureIds, apiKey) {
     if (!fixtureIds.length) return {};
     const byFix = {};
-
-    // Costruisce una mappa player -> ruolo dalle formazioni in cache per pesare gli assenti per ruolo.
-    const existingCache = this.loadMatchCache();
-    const roleMap = {};
-    Object.values(existingCache).forEach(entry => {
-      (entry?.lineups || []).forEach(lu => {
-        (lu.startXI || []).forEach(str => {
-          const m = String(str).match(/^(.+?)\s*\(([GDMF])\)$/);
-          if (m) roleMap[m[1].trim().toLowerCase()] = m[2];
-        });
-      });
-    });
-
-    const calcAvailSplit = (list, hasLineup) => {
-      let attPen = 0, defPen = 0;
+    const calcAvail = list => {
+      let miss = 0, quest = 0;
       const seen = new Set();
-      // Se la formazione ufficiale è già uscita, gli assenti noti impattano leggermente meno perché i sostituti sono già scelti
-      const lineMult = hasLineup ? 0.70 : 1.0;
       list.forEach(x => {
-        const key = String(x.name || "").trim().toLowerCase();
-        if (!key || seen.has(key)) return;
-        seen.add(key);
-        const w = String(x.type).toLowerCase().includes("questionable") ? 0.012 : 0.028;
-        const pos = roleMap[key];
-        if (pos === "G" || pos === "D") defPen += w * 1.15;
-        else if (pos === "F") attPen += w * 1.15;
-        else if (pos === "M") { attPen += w * 0.65; defPen += w * 0.45; }
-        else { attPen += w * 0.55; defPen += w * 0.55; }
+        if (seen.has(x.name)) return;
+        seen.add(x.name);
+        if (String(x.type).toLowerCase().includes("questionable")) quest++;
+        else miss++;
       });
-      const att = Number(clamp(1 - Math.min(0.14, attPen * lineMult), 0.85, 1.0).toFixed(3));
-      const def = Number(clamp(1 - Math.min(0.14, defPen * lineMult), 0.85, 1.0).toFixed(3));
-      const avg = Number(((att + def) * 0.5).toFixed(3));
-      return { att, def, avg };
+      return Number(clamp(1 - Math.min(miss, 5) * 0.025 - Math.min(quest, 4) * 0.01, 0.84, 1.0).toFixed(3));
     };
 
     const parseChunk = (fixturesResp, injuriesResp) => {
@@ -722,20 +663,13 @@ const AFProvider = {
         const fid = fx.fixture?.id;
         if (!fid) return;
         const hId = fx.teams?.home?.id, aId = fx.teams?.away?.id;
-        const lineups = (fx.lineups || []).map(lu => {
-          const list = (lu.startXI || []).map(s => {
-            const nm = s.player?.name || "", ps = s.player?.pos || "";
-            if (nm && ps) roleMap[nm.trim().toLowerCase()] = ps;
-            return `${nm}${ps ? ` (${ps})` : ""}`;
-          });
-          return {
-            teamId: lu.team?.id,
-            isHome: lu.team?.id === hId,
-            formation: lu.formation || "",
-            coach: lu.coach?.name || "",
-            startXI: list
-          };
-        });
+        const lineups = (fx.lineups || []).map(lu => ({
+          teamId: lu.team?.id,
+          isHome: lu.team?.id === hId,
+          formation: lu.formation || "",
+          coach: lu.coach?.name || "",
+          startXI: (lu.startXI || []).map(s => `${s.player?.name || ""}${s.player?.pos ? ` (${s.player.pos})` : ""}`)
+        }));
         const parseStats = teamId => {
           const stObj = (fx.statistics || []).find(s => s.team?.id === teamId);
           if (!stObj) return null;
@@ -771,11 +705,8 @@ const AFProvider = {
 
       const matchCache = this.loadMatchCache();
       Object.values(chunk).forEach(item => {
-        const hasLu = item.lineups.length >= 2;
-        const spH = calcAvailSplit(item.injH, hasLu);
-        const spA = calcAvailSplit(item.injA, hasLu);
-        item.autoHAtt = spH.att; item.autoHDef = spH.def; item.autoHL = spH.avg;
-        item.autoAAtt = spA.att; item.autoADef = spA.def; item.autoAL = spA.avg;
+        item.autoHL = calcAvail(item.injH);
+        item.autoAL = calcAvail(item.injA);
         matchCache[String(item.fid)] = item;
         byFix[item.fid] = item;
       });
@@ -841,22 +772,15 @@ function attachAFCacheToLeagues(leagues) {
   return attached;
 }
 
+const FACT = [1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800];
 const pois = (k, l) => { let p = Math.exp(-l); for (let n = 1; n <= k; n++) p *= l / n; return p; };
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 const safeNum = (v, fb) => Number.isFinite(v) ? v : fb;
 const shrink = (val, gp, leagueAvg, priorWeight = 5) => (val * gp + leagueAvg * priorWeight) / (gp + priorWeight);
 const damp = (f, power = 0.5) => Math.pow(clamp(safeNum(f, 1.0), 0.5, 1.8), power);
 const fairOdd = p => (1 / Math.max(0.02, p)).toFixed(2);
-const logit = p => { const x = clamp(p, 0.01, 0.99); return Math.log(x / (1 - x)); };
-
-const PICK_BASELINES = {
-  "1": 0.44, "2": 0.29, "X": 0.27,
-  "1X": 0.72, "X2": 0.56,
-  "Over 1.5": 0.74, "Under 3.5": 0.72,
-  "Over 2.5": 0.50, "Under 2.5": 0.50,
-  "Gol": 0.50, "No Gol": 0.50
-};
-const pickEdge = (code, prob) => logit(prob) - logit(PICK_BASELINES[code] ?? 0.50);
+const PICK_BASELINES = { "1": 0.44, "2": 0.29, "X": 0.27, "1X": 0.72, "X2": 0.56, "Over 2.5": 0.50, "Under 2.5": 0.50, "Gol": 0.50, "No Gol": 0.50 };
+const pickEdge = (code, prob) => { const b = PICK_BASELINES[code] ?? 0.50; return Math.max(0, (prob - b) / (1 - b)); };
 
 function isHit(code, h, a) {
   const tot = h + a;
@@ -899,11 +823,11 @@ function getTeamAdj(teamId) {
   if (hasDetailed) {
     let rGf = 0, rGa = 0, rEgf = 0, rEga = 0;
     recent.forEach(x => { rGf += x.gf; rGa += x.ga; rEgf += x.egf; rEga += x.ega; });
-    attFactor = clamp((rGf + 4.5) / Math.max(1.0, rEgf + 4.5), 0.92, 1.08);
-    defFactor = clamp((rGa + 4.5) / Math.max(1.0, rEga + 4.5), 0.92, 1.08);
+    attFactor = clamp((rGf + 4.0) / Math.max(1.0, rEgf + 4.0), 0.90, 1.10);
+    defFactor = clamp((rGa + 4.0) / Math.max(1.0, rEga + 4.0), 0.90, 1.10);
   } else if (th.egf > 0 && th.ega > 0) {
-    attFactor = clamp((th.gf + 5.0) / Math.max(1.0, th.egf + 5.0), 0.92, 1.08);
-    defFactor = clamp((th.ga + 5.0) / Math.max(1.0, th.ega + 5.0), 0.92, 1.08);
+    attFactor = clamp((th.gf + 5.0) / Math.max(1.0, th.egf + 5.0), 0.90, 1.10);
+    defFactor = clamp((th.ga + 5.0) / Math.max(1.0, th.ega + 5.0), 0.90, 1.10);
   }
   return {
     attFactor: Number(safeNum(attFactor, 1.0).toFixed(3)),
@@ -912,115 +836,20 @@ function getTeamAdj(teamId) {
   };
 }
 
-function applyTemp3(p1, px, p2, T) {
-  if (!Number.isFinite(T) || Math.abs(T - 1.0) < 0.005) return [p1, px, p2];
-  const inv = 1 / T;
-  const a = Math.pow(Math.max(1e-6, p1), inv);
-  const b = Math.pow(Math.max(1e-6, px), inv);
-  const c = Math.pow(Math.max(1e-6, p2), inv);
-  const s = a + b + c;
-  return [a / s, b / s, c / s];
-}
-
-function applyTemp2(pO, T) {
-  if (!Number.isFinite(T) || Math.abs(T - 1.0) < 0.005) return pO;
-  const inv = 1 / T;
-  const a = Math.pow(Math.max(1e-6, pO), inv);
-  const b = Math.pow(Math.max(1e-6, 1 - pO), inv);
-  return a / (a + b);
-}
-
-function fitCalibrationParams(samples) {
-  if (!Array.isArray(samples) || samples.length < 200) return null;
-  // Ottimizza sulla seconda metà cronologica se molto grande, per ridurre overfitting
-  const evalSet = samples.length >= 600 ? samples.slice(Math.floor(samples.length * 0.4)) : samples;
-  let bestT1X2 = 1.0, baseLL1X2 = 0;
-  evalSet.forEach(s => {
-    const p = s.res1X2 === 0 ? s.p1 : (s.res1X2 === 1 ? s.px : s.p2);
-    baseLL1X2 -= Math.log(Math.max(1e-6, p));
-  });
-  let bestLL1X2 = baseLL1X2;
-
-  for (let T = 0.80; T <= 1.401; T += 0.025) {
-    let ll = 0;
-    for (let i = 0; i < evalSet.length; i++) {
-      const s = evalSet[i];
-      const [c1, cx, c2] = applyTemp3(s.p1, s.px, s.p2, T);
-      const p = s.res1X2 === 0 ? c1 : (s.res1X2 === 1 ? cx : c2);
-      ll -= Math.log(Math.max(1e-6, p));
-    }
-    if (ll < bestLL1X2) { bestLL1X2 = ll; bestT1X2 = Number(T.toFixed(3)); }
-  }
-
-  let bestTOU = 1.0, baseLLOU = 0;
-  evalSet.forEach(s => {
-    const p = s.resO ? s.pO : (1 - s.pO);
-    baseLLOU -= Math.log(Math.max(1e-6, p));
-  });
-  let bestLLOU = baseLLOU;
-
-  for (let T = 0.80; T <= 1.401; T += 0.025) {
-    let ll = 0;
-    for (let i = 0; i < evalSet.length; i++) {
-      const s = evalSet[i];
-      const cO = applyTemp2(s.pO, T);
-      const p = s.resO ? cO : (1 - cO);
-      ll -= Math.log(Math.max(1e-6, p));
-    }
-    if (ll < bestLLOU) { bestLLOU = ll; bestTOU = Number(T.toFixed(3)); }
-  }
-
-  return {
-    temp1X2: bestT1X2,
-    tempOU: bestTOU,
-    n: evalSet.length,
-    llBefore: Number(((baseLL1X2 + baseLLOU) / evalSet.length).toFixed(4)),
-    llAfter: Number(((bestLL1X2 + bestLLOU) / evalSet.length).toFixed(4))
-  };
-}
-
-function calcPred(m, ov = {}, useCal = true, usePostCal = true) {
-  const hasManualOv = ov.hL !== undefined || ov.aL !== undefined;
-  let hAtt = 1.0, hDef = 1.0, aAtt = 1.0, aDef = 1.0;
-
-  if (hasManualOv) {
-    const baseHL = m.af ? safeNum(m.af.autoHL, 1.0) : safeNum(m.stats.hL, 1.0);
-    const baseAL = m.af ? safeNum(m.af.autoAL, 1.0) : safeNum(m.stats.aL, 1.0);
-    const hL = safeNum(ov.hL ?? baseHL, 1.0), aL = safeNum(ov.aL ?? baseAL, 1.0);
-    if (m.af && Math.abs(hL - baseHL) < 0.002) {
-      hAtt = safeNum(m.af.autoHAtt, baseHL);
-      hDef = safeNum(m.af.autoHDef, baseHL);
-    } else {
-      hAtt = 0.5 + 0.5 * hL;
-      hDef = 0.5 + 0.5 * hL;
-    }
-    if (m.af && Math.abs(aL - baseAL) < 0.002) {
-      aAtt = safeNum(m.af.autoAAtt, baseAL);
-      aDef = safeNum(m.af.autoADef, baseAL);
-    } else {
-      aAtt = 0.5 + 0.5 * aL;
-      aDef = 0.5 + 0.5 * aL;
-    }
-  } else if (m.af) {
-    hAtt = safeNum(m.af.autoHAtt, safeNum(m.af.autoHL, 1.0));
-    hDef = safeNum(m.af.autoHDef, safeNum(m.af.autoHL, 1.0));
-    aAtt = safeNum(m.af.autoAAtt, safeNum(m.af.autoAL, 1.0));
-    aDef = safeNum(m.af.autoADef, safeNum(m.af.autoAL, 1.0));
-  } else {
-    const hL = safeNum(m.stats.hL, 1.0), aL = safeNum(m.stats.aL, 1.0);
-    hAtt = hL; hDef = hL; aAtt = aL; aDef = aL;
-  }
-
+function calcPred(m, ov = {}, useCal = true, learningModel = null) {
+  const baseHL = m.af ? safeNum(m.af.autoHL, 1.0) : safeNum(m.stats.hL, 1.0);
+  const baseAL = m.af ? safeNum(m.af.autoAL, 1.0) : safeNum(m.stats.aL, 1.0);
+  const hL = safeNum(ov.hL ?? baseHL, 1.0), aL = safeNum(ov.aL ?? baseAL, 1.0);
   const neutralAdj = { attFactor: 1.0, defFactor: 1.0, elo: null };
-  const adjH = (useCal && st.autoCal) ? (m.stats.adjH ?? (m.homeId ? getTeamAdj(m.homeId) : neutralAdj)) : neutralAdj;
-  const adjA = (useCal && st.autoCal) ? (m.stats.adjA ?? (m.awayId ? getTeamAdj(m.awayId) : neutralAdj)) : neutralAdj;
+  const adjH = (useCal && (learningModel || st.autoCal)) ? (m.stats.adjH ?? (m.homeId ? getTeamAdj(m.homeId) : neutralAdj)) : neutralAdj;
+  const adjA = (useCal && (learningModel || st.autoCal)) ? (m.stats.adjA ?? (m.awayId ? getTeamAdj(m.awayId) : neutralAdj)) : neutralAdj;
   const avgH = clamp(safeNum(m.stats.avgH, 1.48), 0.5, 3), avgA = clamp(safeNum(m.stats.avgA, 1.18), 0.5, 3);
   const hGF = safeNum(m.stats.hGF, avgH), hGA = safeNum(m.stats.hGA, avgA);
   const aGF = safeNum(m.stats.aGF, avgA), aGA = safeNum(m.stats.aGA, avgH);
   const hFF = safeNum(m.stats.hFF, 1.0), aFF = safeNum(m.stats.aFF, 1.0);
 
   let eloMult = 1.0;
-  if (useCal && st.autoCal) {
+  if (useCal && (learningModel || st.autoCal)) {
     const eloH = safeNum(m.stats.eloH, adjH.elo);
     const eloA = safeNum(m.stats.eloA, adjA.elo);
     if (Number.isFinite(eloH) || Number.isFinite(eloA)) {
@@ -1028,143 +857,102 @@ function calcPred(m, ov = {}, useCal = true, usePostCal = true) {
       const defEloA = LEAGUE_TIER[m.stats.domSlugA || m.slug]?.elo ?? 1470;
       const effEloH = Number.isFinite(eloH) ? eloH : defEloH;
       const effEloA = Number.isFinite(eloA) ? eloA : defEloA;
-      const wt = m.stats.isCrossLeague ? 0.20 : 0.08;
+      const wt = m.stats.isCrossLeague ? 0.18 : 0.06;
       eloMult = clamp(Math.pow(10, ((effEloH - effEloA) / 400) * wt), 0.78, 1.28);
     } else if (m.stats.isCrossLeague && m.stats.tierH && m.stats.tierA) {
       eloMult = clamp(Math.pow(m.stats.tierH / m.stats.tierA, 1.2), 0.84, 1.19);
     }
   }
 
-  // Riduciamo gli esponenti di forma e residuo per evitare doppio conteggio con hGF/aGA ed ELO.
-  // Gli infortuni difensivi dell'avversario (1 / aDef) aumentano i gol attesi della squadra.
-  const lamH = clamp(
-    (hGF / avgH) * (aGA / avgH) * avgH *
-    damp(hFF, 0.30) * hAtt / clamp(aDef, 0.85, 1.0) *
-    damp(adjH.attFactor, 0.35) * damp(adjA.defFactor, 0.35) * eloMult,
-    0.15, 6
-  );
-  const lamA = clamp(
-    (aGF / avgA) * (hGA / avgA) * avgA *
-    damp(aFF, 0.30) * aAtt / clamp(hDef, 0.85, 1.0) *
-    damp(adjA.attFactor, 0.35) * damp(adjH.defFactor, 0.35) / eloMult,
-    0.15, 6
-  );
+  const lamH = clamp( (hGF / avgH) * (aGA / avgH) * avgH * damp(hFF, 0.5) * hL * damp(adjH.attFactor, 0.5) * damp(adjA.defFactor, 0.5) * eloMult, 0.15, 6);
+  const lamA = clamp( (aGF / avgA) * (hGA / avgA) * avgA * damp(aFF, 0.5) * aL * damp(adjA.attFactor, 0.5) * damp(adjH.defFactor, 0.5) / eloMult, 0.15, 6);
 
-  // Dixon-Coles rho scalato su (lamH * lamA) per non gonfiare lo 0-0 sulle gare aperte.
-  const rho = Math.max(-0.09, -0.14 / Math.max(1.0, lamH * lamA));
+  // Sensitivity mixture: uncertain scoring intensity, not a fitted calibration.
+  const sample = Math.min(safeNum(m.stats.sampleH, 0), safeNum(m.stats.sampleA, 0));
+  const spread = sample >= 15 ? 0.10 : sample >= 5 ? 0.18 : 0.28;
+  const scenarios = [[1-spread,0.25],[1,0.50],[1+spread,0.25]].map(([scale,weight])=>{const lh=lamH*scale,la=lamA*scale;return {lh,la,weight,rho:Math.max(-0.08,-0.95/Math.max(lh,la)),ph:Array.from({length:25},(_,i)=>pois(i,lh)),pa:Array.from({length:25},(_,i)=>pois(i,la))};});
   const scores = [];
   let totalP = 0;
   for (let i = 0; i <= 24; i++) {
-    const pi = pois(i, lamH);
     for (let j = 0; j <= 24; j++) {
-      let p = pi * pois(j, lamA);
-      if (i === 0 && j === 0) p *= Math.max(0.05, 1 - lamH * lamA * rho);
-      else if (i === 1 && j === 0) p *= Math.max(0.05, 1 + lamA * rho);
-      else if (i === 0 && j === 1) p *= Math.max(0.05, 1 + lamH * rho);
-      else if (i === 1 && j === 1) p *= Math.max(0.05, 1 - rho);
+      let p = 0;
+      for (const {lh,la,weight,rho,ph,pa} of scenarios) {
+        let q = ph[i]*pa[j];
+        if (i===0 && j===0) q *= 1-lh*la*rho;
+        else if (i===1 && j===0) q *= 1+la*rho;
+        else if (i===0 && j===1) q *= 1+lh*rho;
+        else if (i===1 && j===1) q *= 1-rho;
+        p += weight*q;
+      }
       scores.push({ i, j, p });
       totalP += p;
     }
   }
 
+  // One joint distribution for every market. Market targets are soft, then
+  // iterative proportional fitting reconciles the marginals with scorelines.
   scores.forEach(x => x.p /= totalP);
   const sumWhere = fn => scores.reduce((sum, x) => sum + (fn(x) ? x.p : 0), 0);
   const home = x => x.i > x.j, draw = x => x.i === x.j, away = x => x.i < x.j;
   const over = x => x.i + x.j > 2;
   const rawProbs = { p1: sumWhere(home), px: sumWhere(draw), p2: sumWhere(away), pO: sumWhere(over) };
-
-  // Calibrazione Temperature Scaling post-hoc (se fittata su storico >= 200 match)
-  let calP1 = rawProbs.p1, calPX = rawProbs.px, calP2 = rawProbs.p2, calPO = rawProbs.pO;
-  let isCalibrated = false;
-  if (useCal && usePostCal && st.autoCal && CAL_PARAMS && Number.isFinite(CAL_PARAMS.temp1X2)) {
-    [calP1, calPX, calP2] = applyTemp3(calP1, calPX, calP2, CAL_PARAMS.temp1X2);
-    if (Number.isFinite(CAL_PARAMS.tempOU)) calPO = applyTemp2(calPO, CAL_PARAMS.tempOU);
-    isCalibrated = true;
-  }
-
+  const ml = useCal && (learningModel || st.autoCal) ? v13Distribution(scores,m,lamH,lamA,learningModel || v13Model,m.startTs) : null;
+  const adapted = [sumWhere(home),sumWhere(draw),sumWhere(away)], adaptedO = sumWhere(over);
   let marketDiv = 0;
   const odds = m.odds;
   const validMarket = odds && [odds.mktP1, odds.mktPX, odds.mktP2].every(v => Number.isFinite(v) && v > 0 && v < 1);
-  let target1X2 = [calP1, calPX, calP2];
-  let targetO = calPO;
-  let needIPF = isCalibrated;
-
   if (useCal && validMarket) {
     const z = odds.mktP1 + odds.mktPX + odds.mktP2;
-    const market = [odds.mktP1 / z, odds.mktPX / z, odds.mktP2 / z];
-    marketDiv = Math.max(
-      Math.abs(calP1 - market[0]),
-      Math.abs(calPX - market[1]),
-      Math.abs(calP2 - market[2])
-    );
+    const market = [odds.mktP1/z, odds.mktPX/z, odds.mktP2/z];
+    const raw = [rawProbs.p1, rawProbs.px, rawProbs.p2];
+    marketDiv = Math.max(...raw.map((v,i) => Math.abs(v-market[i])), Number.isFinite(odds.mktPO) ? Math.abs(rawProbs.pO-odds.mktPO) : 0);
     if (st.useMarketBlend) {
-      const w = odds.isTrueSharp ? 0.28 : 0.14;
-      target1X2 = target1X2.map((v, i) => (1 - w) * v + w * market[i]);
-      if (Number.isFinite(odds.mktPO) && odds.mktPO > 0 && odds.mktPO < 1) {
-        targetO = (1 - w) * calPO + w * odds.mktPO;
-      }
-      needIPF = true;
-    }
-  }
-
-  if (needIPF) {
-    const hasOverTarget = Number.isFinite(targetO) && targetO > 0.01 && targetO < 0.99;
-    for (let n = 0; n < 20; n++) {
-      const current = [sumWhere(home), sumWhere(draw), sumWhere(away)];
-      scores.forEach(x => {
-        const i = home(x) ? 0 : draw(x) ? 1 : 2;
-        x.p *= target1X2[i] / Math.max(1e-12, current[i]);
-      });
-      if (hasOverTarget) {
-        const o = sumWhere(over);
-        scores.forEach(x => {
-          x.p *= over(x) ? targetO / Math.max(1e-12, o) : (1 - targetO) / Math.max(1e-12, 1 - o);
-        });
+      const w = 0.28; // provisional, not fitted
+      const targets = adapted.map((v,i) => (1-w)*v+w*market[i]);
+      const hasOver = Number.isFinite(odds.mktPO) && odds.mktPO > 0 && odds.mktPO < 1;
+      const targetO = hasOver ? (1-w)*adaptedO+w*odds.mktPO : null;
+      for (let n=0; n<20; n++) {
+        const current = [sumWhere(home),sumWhere(draw),sumWhere(away)];
+        scores.forEach(x => { const i=home(x)?0:draw(x)?1:2; x.p *= targets[i]/Math.max(1e-12,current[i]); });
+        if (hasOver) { const o=sumWhere(over); scores.forEach(x => x.p *= over(x)?targetO/Math.max(1e-12,o):(1-targetO)/Math.max(1e-12,1-o)); }
       }
     }
   }
-
   const norm = sumWhere(() => true); scores.forEach(x => x.p /= norm);
-  const p1 = sumWhere(home), px = sumWhere(draw), p2 = sumWhere(away), pO = sumWhere(over), pG = sumWhere(x => x.i > 0 && x.j > 0);
-  const pO15 = sumWhere(x => x.i + x.j >= 2), pU35 = sumWhere(x => x.i + x.j <= 3);
-  const p1X_O15 = sumWhere(x => x.i >= x.j && x.i + x.j >= 2), pX2_O15 = sumWhere(x => x.j >= x.i && x.i + x.j >= 2);
-  const p1X_U35 = sumWhere(x => x.i >= x.j && x.i + x.j <= 3), pX2_U35 = sumWhere(x => x.j >= x.i && x.i + x.j <= 3);
-  const pMG13 = sumWhere(x => x.i + x.j >= 1 && x.i + x.j <= 3), pMG24 = sumWhere(x => x.i + x.j >= 2 && x.i + x.j <= 4);
-  const pHomeG = sumWhere(x => x.i >= 1), pAwayG = sumWhere(x => x.j >= 1);
+  const p1=sumWhere(home), px=sumWhere(draw), p2=sumWhere(away), pO=sumWhere(over), pG=sumWhere(x=>x.i>0&&x.j>0);
+  const pO15=sumWhere(x=>x.i+x.j>=2), pU35=sumWhere(x=>x.i+x.j<=3);
+  const p1X_O15=sumWhere(x=>x.i>=x.j&&x.i+x.j>=2), pX2_O15=sumWhere(x=>x.j>=x.i&&x.i+x.j>=2);
+  const p1X_U35=sumWhere(x=>x.i>=x.j&&x.i+x.j<=3), pX2_U35=sumWhere(x=>x.j>=x.i&&x.i+x.j<=3);
+  const pMG13=sumWhere(x=>x.i+x.j>=1&&x.i+x.j<=3), pMG24=sumWhere(x=>x.i+x.j>=2&&x.i+x.j<=4);
+  const pHomeG=sumWhere(x=>x.i>=1), pAwayG=sumWhere(x=>x.j>=1);
 
   const topScores = scores.sort((a, b) => b.p - a.p).slice(0, 3).map(s => ({ score: `${s.i}-${s.j}`, prob: s.p }));
-  const candidates1X2 = [
+  const best1X2 = [
     { code: "1", cat: "1X2", label: "Vittoria " + m.home, prob: p1 },
     { code: "2", cat: "1X2", label: "Vittoria " + m.away, prob: p2 },
     { code: "X", cat: "1X2", label: "Pareggio", prob: px }
-  ];
-  const best1X2 = candidates1X2.reduce((b, c) => c.prob > b.prob ? c : b);
+  ].reduce((b, c) => c.prob > b.prob ? c : b);
 
   const bestDC = p1 >= p2
     ? { code: "1X", cat: "DC", label: m.home + " o X", prob: p1 + px }
     : { code: "X2", cat: "DC", label: m.away + " o X", prob: px + p2 };
 
-  const candidatesGoals = [
+  const bestGoals = [
+    { code: "Over 1.5", cat: "GOALS", label: "2+ Gol", prob: pO15 },
+    { code: "Under 3.5", cat: "GOALS", label: "0-3 Gol", prob: pU35 },
     { code: "Over 2.5", cat: "GOALS", label: "3+ Gol", prob: pO },
     { code: "Under 2.5", cat: "GOALS", label: "0-2 Gol", prob: 1 - pO },
     { code: "Gol", cat: "GOALS", label: "Entrambe a segno", prob: pG },
-    { code: "No Gol", cat: "GOALS", label: "Almeno una a zero", prob: 1 - pG },
-    { code: "Over 1.5", cat: "GOALS", label: "2+ Gol", prob: pO15 },
-    { code: "Under 3.5", cat: "GOALS", label: "0-3 Gol", prob: pU35 }
-  ];
+    { code: "No Gol", cat: "GOALS", label: "Almeno una a zero", prob: 1 - pG }
+  ].reduce((b, c) => c.prob > b.prob ? c : b);
 
-  // Seleziona in base al guadagno informativo (log-odds vs baseline di mercato), evitando Over 1.5/Under 3.5 automatici.
-  const allCandidates = [...candidates1X2, bestDC, ...candidatesGoals];
-  const playablePool = allCandidates.filter(c => c.prob >= 0.48);
-  const pool = playablePool.length ? playablePool : allCandidates;
-  const bestPick = pool.reduce((b, c) => pickEdge(c.code, c.prob) > pickEdge(b.code, b.prob) ? c : b);
-  const bestEdge = pickEdge(bestPick.code, bestPick.prob);
-
-  const ouPick = pO >= 0.5 ? { code: "Over 2.5", prob: pO, isOver: true } : { code: "Under 2.5", prob: 1 - pO, isOver: false };
-  const quality = clamp(0.70 * safeNum(m.stats.comp, 0.35) + 0.30 * (1 - clamp(safeNum(m.stats.vol, 0.5), 0, 1)), 0, 1);
-  const conf = Math.round(100 * clamp(quality - (m.lowData ? 0.20 : 0) - Math.min(0.20, marketDiv * 0.7), 0, 1));
-  const rankScore = (bestPick.prob * 0.65 + clamp(bestEdge / 2, 0, 0.5) * 0.35) * conf;
-  const eligible = bestPick.prob >= 0.62 && bestEdge >= 0.50 && conf >= 75 && !m.lowData && marketDiv < 0.14;
+  // Select by estimated success probability; data quality is separate.
+  const bestPick = [best1X2, bestDC, bestGoals].reduce((b,c)=>c.prob>b.prob?c:b);
+  const ouPick = pO >= 0.5 ? { code: "Over 2.5", prob: pO, isOver: true } : { code: "Under 2.5", prob: 1-pO, isOver: false };
+  const quality = clamp(0.70*safeNum(m.stats.comp,0.35)+0.30*(1-clamp(safeNum(m.stats.vol,0.5),0,1)),0,1);
+  const conf = Math.round(100*clamp(quality-(m.lowData?0.20:0)-Math.min(0.20,marketDiv*0.7),0,1));
+  const rankScore = bestPick.prob * conf;
+  const eligible = bestPick.prob >= 0.75 && conf >= 75 && !m.lowData && marketDiv < 0.14;
 
   let bestValue = null;
   if (m.odds?.best && conf >= 75 && marketDiv < 0.14) {
@@ -1194,8 +982,7 @@ function calcPred(m, ov = {}, useCal = true, usePostCal = true) {
     lamH: lamH.toFixed(2), lamA: lamA.toFixed(2),
     probs: { p1, px, p2, pO, pU: 1 - pO, pG, pNG: 1 - pG },
     rawProbs, marketDiv, bestValue,
-    bestPick, best1X2, ouPick, topScores, combos, confidence: conf, rankScore, eligible,
-    modelVersion: "8.0", calibrated: isCalibrated
+    bestPick, best1X2, ouPick, topScores, combos, confidence: conf, rankScore, eligible, modelVersion: "13.0", calibrated: Boolean(ml?.active), ml: learningModel ? ml : undefined, mlActive: Boolean(ml?.active)
   };
 }
 
@@ -1325,10 +1112,12 @@ function targetDateKey(offset) {
 }
 
 function renderTeamLeaderboard() {
+  v13Status(); v13LiveStatus();
   const raw = getTeamHist(), q = document.getElementById("teamHistSearch").value.trim().toLowerCase();
   const minM = Number(document.getElementById("minMatchesFilter").value), all = Object.values(raw);
   const tot = all.reduce((s, x) => s + x.tot, 0), hits = all.reduce((s, x) => s + x.hit, 0), ouHits = all.reduce((s, x) => s + x.ou, 0);
 
+  const exactMarkets = {}; const seenEvents = new Set();
   let uniqueM = 0, brierSum = 0, b1x2Sum = 0, b1x2Cnt = 0, bOuSum = 0, bOuCnt = 0;
   const byCat = { "1X2": { n: 0, h: 0 }, "DC": { n: 0, h: 0 }, "GOALS": { n: 0, h: 0 } };
   const bins = [
@@ -1341,6 +1130,13 @@ function renderTeamLeaderboard() {
   all.forEach(t => {
     (t.m || []).forEach(x => {
       if (x.h !== 1 || !Number.isFinite(x.pr)) return;
+      if (x.eventId && seenEvents.has(x.eventId)) return;
+      if (x.eventId) seenEvents.add(x.eventId);
+      if (x.modelVersion === "13.0") Object.entries(x.markets || {}).forEach(([code,v]) => {
+        if (!Number.isFinite(v.p) || ![0,1].includes(v.y)) return;
+        const r = exactMarkets[code] ||= {n:0,p:0,y:0,b:0};
+        r.n++; r.p+=v.p; r.y+=v.y; r.b+=(v.p-v.y)**2;
+      });
       uniqueM++; brierSum += Math.pow(x.pr - x.ph, 2);
       if (Number.isFinite(x.b1x2)) { b1x2Sum += x.b1x2; b1x2Cnt++; }
       if (Number.isFinite(x.bOu)) { bOuSum += x.bOu; bOuCnt++; }
@@ -1359,15 +1155,10 @@ function renderTeamLeaderboard() {
   if (uniqueM > 0) {
     calBox.classList.remove("hidden");
     const fmtCat = (label, obj) => obj.n ? `<span class="px-2 py-0.5 rounded bg-slate-900 border border-slate-800">${label}: <strong class="text-white">${Math.round(obj.h / obj.n * 100)}%</strong> <span class="text-slate-500">(${obj.n.toLocaleString("it-IT")})</span></span>` : "";
-    const cal = getCalParams();
-    const calLine = cal
-      ? `<span class="text-emerald-300">Temp. 1X2: <strong>${cal.temp1X2}</strong> • O/U: <strong>${cal.tempOU}</strong> (LL ${cal.llBefore}→${cal.llAfter})</span>`
-      : "";
-    const marketBriers = (b1x2Cnt || bOuCnt || calLine)
+    const marketBriers = (b1x2Cnt || bOuCnt)
       ? `<div class="flex flex-wrap gap-2 text-[10px] text-slate-400 pt-1 border-t border-slate-800/80">
           ${b1x2Cnt ? `<span title="3-esiti (casuale = 0.667, buono < 0.60)">Brier 1X2: <strong class="text-cyan-300">${(b1x2Sum / b1x2Cnt).toFixed(3)}</strong></span>` : ""}
           ${bOuCnt ? `<span title="Binario (casuale = 0.250, buono < 0.240)">Brier O/U 2.5: <strong class="text-fuchsia-300">${(bOuSum / bOuCnt).toFixed(3)}</strong></span>` : ""}
-          ${calLine}
         </div>` : "";
     calBox.innerHTML = `
       <div class="flex flex-wrap items-center justify-between gap-1.5">
@@ -1380,7 +1171,7 @@ function renderTeamLeaderboard() {
           const exp = b.n ? Math.round((b.pSum / b.n) * 100) + "%" : "-";
           return `<div class="p-1.5 rounded-lg bg-slate-900/70"><div class="text-[9px] text-slate-400">Prev. ${b.label}</div><div class="font-bold text-emerald-400">${real} <span class="text-[9px] text-slate-500 font-normal">vs ${exp}</span></div></div>`;
         }).join("")}
-      </div>${marketBriers}`;
+      </div>${marketBriers}<div class="pt-2 border-t border-slate-800"><strong>Diagnostica V13 per mercato (backtest cronologico)</strong>${Object.entries(exactMarkets).map(([code,r])=>`<div>${esc(code)} • n=${r.n} • previsto ${(100*r.p/r.n).toFixed(1)}% • osservato ${(100*r.y/r.n).toFixed(1)}% • Brier ${(r.b/r.n).toFixed(3)}</div>`).join("") || " — rigenera lo storico"}</div>`;
   } else {
     calBox.classList.add("hidden");
   }
