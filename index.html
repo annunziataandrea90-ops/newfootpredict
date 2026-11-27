@@ -50,7 +50,7 @@
             <option value="league">Ordina: Campionato</option>
             <option value="time">Ordina: Orario</option>
             <option value="prob">Ordina: Probabilità ↓</option>
-            <option value="conf">Ordina: Attendibilità ↓</option>
+            <option value="conf">Ordina: Qualità dati ↓</option>
             <option value="ev">Ordina: Value EV% ↓</option>
           </select>
         </div>
@@ -58,7 +58,7 @@
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-center">
           <div>
             <div class="flex justify-between text-[11px] mb-1">
-              <span class="text-slate-400">Attendibilità min.</span>
+              <span class="text-slate-400">Qualità dati min.</span>
               <span id="minConfLabel" class="font-bold text-emerald-400">0%</span>
             </div>
             <input id="minConfSlider" type="range" min="0" max="90" step="5" value="0" class="w-full accent-emerald-500" />
@@ -72,11 +72,11 @@
               <input id="onlyValueToggle" type="checkbox" class="accent-fuchsia-400" />
               <span>💎 Value</span>
             </label>
-            <label class="flex items-center gap-1 cursor-pointer text-emerald-300 font-semibold">
+            <label class="flex items-center gap-1 cursor-pointer text-emerald-300 font-semibold" title="Applica ELO storico, correzione attacco/difesa e calibrazione temperatura 10A">
               <input id="autoCalToggle" type="checkbox" checked class="accent-emerald-500" />
               <span>🧠 ELO</span>
             </label>
-            <label class="flex items-center gap-1 cursor-pointer text-cyan-300 font-semibold" title="Fonde 72% modello + 28% quote sharp quando disponibili">
+            <label class="flex items-center gap-1 cursor-pointer text-cyan-300 font-semibold" title="Blend con quote mercato (28% Pinnacle/Betfair, 14% media book) tramite IPF coerente">
               <input id="marketBlendToggle" type="checkbox" checked class="accent-cyan-400" />
               <span>⚖️ Mercato</span>
             </label>
@@ -201,8 +201,8 @@
     </div>
   </div>
 
-<script src="app1.js?v=6"></script>
-  <script src="app2.js?v=6"></script>
-  <script src="app3.js?v=5"></script>
+  <script src="app1.js?v=8"></script>
+  <script src="app2.js?v=8"></script>
+  <script src="app3.js?v=8"></script>
 </body>
 </html>
