@@ -22,7 +22,7 @@ function recalcAllPredictions() {
       // Keep the first pre-match prediction immutable, independently of later simulations.
       if (!snap) { predictionSnapshots[key] = { capturedAt: now, startTs: m.startTs, prediction: m.prediction }; changed = true; }
       // Preserve first forecast; separately retain latest strictly pre-match forecast.
-      predictionSnapshots[key].latest = { capturedAt: now, prediction: m.prediction }; changed = true;
+      predictionSnapshots[key].latest = { capturedAt: now, prediction: m.prediction }; v14Capture(m); changed = true;
     } else {
       m.predictionVerified = Boolean(snap && snap.capturedAt < m.startTs);
       m.prediction = m.predictionVerified ? snap.prediction : calcPred(m);
@@ -33,7 +33,7 @@ function recalcAllPredictions() {
     for(const [k,v] of Object.entries(predictionSnapshots))if(v.startTs<now-180*86400000)delete predictionSnapshots[k];
     idbSet(SNAP_KEY,predictionSnapshots).catch(e=>{console.warn('Snapshot non salvato',e);const el=document.getElementById('v13LiveStatus');if(el)el.textContent='Errore persistenza snapshot: controllare spazio e IndexedDB.';});
   }
-  v13LiveStatus();
+  v13LiveStatus(); v14Render();
 }
 
 function updateApiStatusBars(customOdds = null, customAf = null) {
