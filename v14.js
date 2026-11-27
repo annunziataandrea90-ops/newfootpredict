@@ -11,13 +11,13 @@ function v14Candidate(pred, league) {
   return out;
 }
 function v14Capture(m){
-  if(!m.prediction || m.stateType!=='pre' || Date.now()>=m.startTs)return;
+  if(typeof V14_DATA === "undefined" || !m.prediction || m.stateType!=='pre' || Date.now()>=m.startTs)return;
   const snap=predictionSnapshots[String(m.id)+':'+String(m.startTs)];
   if(!snap || snap.v14 || m.startTs<=Date.parse(V14_DATA.report.end+'T23:59:59Z'))return;
   snap.v14={version:1,capturedAt:Date.now(),base:buildPickMap(m.prediction),candidate:v14Candidate(m.prediction,m.leagueName),league:m.leagueName};
 }
 function v14Render(){
-  const el=document.getElementById('v14Panel');if(!el)return;
+  const el=document.getElementById('v14Panel');if(!el)return; if(typeof V14_DATA === 'undefined'){el.textContent='Modello V14 non caricato: controllare v14-model.js.';return;}
   const r=V14_DATA.report, fmt=x=>Number(x).toFixed(5), pct=x=>(100*x).toFixed(2)+'%';
   let liveN=0,lb=0,lc=0,ln=0;
   for(const s of Object.values(predictionSnapshots)){

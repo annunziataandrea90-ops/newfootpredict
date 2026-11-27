@@ -1112,7 +1112,7 @@ function targetDateKey(offset) {
 }
 
 function renderTeamLeaderboard() {
-  v13Status(); v13LiveStatus(); v14Render();
+  v13Status(); v13LiveStatus(); if(typeof v14Render === "function") { try { v14Render(); } catch(e) { console.warn("V14 shadow render",e); } }
   const raw = getTeamHist(), q = document.getElementById("teamHistSearch").value.trim().toLowerCase();
   const minM = Number(document.getElementById("minMatchesFilter").value), all = Object.values(raw);
   const tot = all.reduce((s, x) => s + x.tot, 0), hits = all.reduce((s, x) => s + x.hit, 0), ouHits = all.reduce((s, x) => s + x.ou, 0);
