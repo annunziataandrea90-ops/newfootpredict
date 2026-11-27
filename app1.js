@@ -202,7 +202,7 @@ function loadSlip() {
 }
 
 async function initStorage() {
-  await Promise.all([v13Load(),v13LoadSnapshots()]); v13Status();
+  await Promise.all([v13Load(), v13LoadSnapshots()]); v13Status();
   loadSlip();
   renderSlipBar();
   try {
@@ -645,7 +645,7 @@ const AFProvider = {
   async fetchDetailsBatch(fixtureIds, apiKey) {
     if (!fixtureIds.length) return {};
     const byFix = {};
-    const calcAvail = list => {
+    const calcImpact = (list, hasLineups) => {
       let miss = 0, quest = 0;
       const seen = new Set();
       list.forEach(x => {
@@ -654,7 +654,13 @@ const AFProvider = {
         if (String(x.type).toLowerCase().includes("questionable")) quest++;
         else miss++;
       });
-      return Number(clamp(1 - Math.min(miss, 5) * 0.025 - Math.min(quest, 4) * 0.01, 0.84, 1.0).toFixed(3));
+      const w = hasLineups ? 0.45 : 1.0;
+      const attPen = Math.min(miss, 4) * 0.022 * w + Math.min(quest, 3) * 0.008 * w;
+      const defPen = Math.min(miss, 4) * 0.018 * w + Math.min(quest, 3) * 0.006 * w;
+      return {
+        att: Number(clamp(1 - attPen, 0.86, 1.0).toFixed(3)),
+        defBoost: Number(clamp(1 + defPen, 1.0, 1.12).toFixed(3))
+      };
     };
 
     const parseChunk = (fixturesResp, injuriesResp) => {
@@ -705,8 +711,12 @@ const AFProvider = {
 
       const matchCache = this.loadMatchCache();
       Object.values(chunk).forEach(item => {
-        item.autoHL = calcAvail(item.injH);
-        item.autoAL = calcAvail(item.injA);
+        const hasLineups = Array.isArray(item.lineups) && item.lineups.length === 2;
+        item.hasLineups = hasLineups;
+        item.impactH = calcImpact(item.injH, hasLineups);
+        item.impactA = calcImpact(item.injA, hasLineups);
+        item.autoHL = item.impactH.att;
+        item.autoAL = item.impactA.att;
         matchCache[String(item.fid)] = item;
         byFix[item.fid] = item;
       });
@@ -806,40 +816,46 @@ function isHit(code, h, a) {
   return false;
 }
 
+function getSplitForm(teamId, fallbackFactor = 1.0, avgFor = 1.35, avgAg = 1.35) {
+  const th = getTeamHist()[teamId];
+  if (!th || !Array.isArray(th.m) || th.m.length < 4) {
+    const rel = clamp(safeNum(fallbackFactor, 1.0), 0.90, 1.10);
+    return { att: Math.sqrt(rel), def: 1 / Math.sqrt(rel) };
+  }
+  const rec = th.m.slice(-8).filter(x => Number.isFinite(x.gf) && Number.isFinite(x.ga));
+  if (rec.length < 4) {
+    const rel = clamp(safeNum(fallbackFactor, 1.0), 0.90, 1.10);
+    return { att: Math.sqrt(rel), def: 1 / Math.sqrt(rel) };
+  }
+  const lastDate = Date.parse(rec[rec.length - 1].d);
+  if (lastDate && (Date.now() - lastDate) > 45 * 86400000) return { att: 1.0, def: 1.0 };
+
+  let wSum = 0, gfW = 0, gaW = 0;
+  rec.forEach((x, idx) => {
+    const w = Math.pow(0.82, rec.length - 1 - idx);
+    wSum += w;
+    gfW += x.gf * w;
+    gaW += x.ga * w;
+  });
+  const effN = rec.length;
+  const att = clamp(((gfW / wSum) * effN + avgFor * 5) / ((effN + 5) * avgFor), 0.82, 1.22);
+  const def = clamp(((gaW / wSum) * effN + avgAg * 5) / ((effN + 5) * avgAg), 0.82, 1.22);
+  return { att: Number(att.toFixed(3)), def: Number(def.toFixed(3)) };
+}
+
 function getTeamAdj(teamId) {
   const th = getTeamHist()[teamId];
-  if (!th) return { attFactor: 1.0, defFactor: 1.0, elo: null };
-  const elo = Number.isFinite(th.elo) ? th.elo : null;
-  if (th.tot < 5) return { attFactor: 1.0, defFactor: 1.0, elo };
-
-  const recent = Array.isArray(th.m) ? th.m.slice(-15) : [];
-  const lastDate = recent.length ? Date.parse(recent[recent.length - 1].d) : 0;
-  if (lastDate && (Date.now() - lastDate) > 45 * 86400000) {
-    return { attFactor: 1.0, defFactor: 1.0, elo };
-  }
-
-  const hasDetailed = recent.length >= 5 && recent.every(x => Number.isFinite(x.gf) && Number.isFinite(x.egf));
-  let attFactor = 1.0, defFactor = 1.0;
-  if (hasDetailed) {
-    let rGf = 0, rGa = 0, rEgf = 0, rEga = 0;
-    recent.forEach(x => { rGf += x.gf; rGa += x.ga; rEgf += x.egf; rEga += x.ega; });
-    attFactor = clamp((rGf + 4.0) / Math.max(1.0, rEgf + 4.0), 0.90, 1.10);
-    defFactor = clamp((rGa + 4.0) / Math.max(1.0, rEga + 4.0), 0.90, 1.10);
-  } else if (th.egf > 0 && th.ega > 0) {
-    attFactor = clamp((th.gf + 5.0) / Math.max(1.0, th.egf + 5.0), 0.90, 1.10);
-    defFactor = clamp((th.ga + 5.0) / Math.max(1.0, th.ega + 5.0), 0.90, 1.10);
-  }
-  return {
-    attFactor: Number(safeNum(attFactor, 1.0).toFixed(3)),
-    defFactor: Number(safeNum(defFactor, 1.0).toFixed(3)),
-    elo
-  };
+  const elo = th && Number.isFinite(th.elo) ? th.elo : null;
+  return { attFactor: 1.0, defFactor: 1.0, elo };
 }
 
 function calcPred(m, ov = {}, useCal = true, learningModel = null) {
-  const baseHL = m.af ? safeNum(m.af.autoHL, 1.0) : safeNum(m.stats.hL, 1.0);
-  const baseAL = m.af ? safeNum(m.af.autoAL, 1.0) : safeNum(m.stats.aL, 1.0);
-  const hL = safeNum(ov.hL ?? baseHL, 1.0), aL = safeNum(ov.aL ?? baseAL, 1.0);
+  const afH = m.af?.impactH || { att: safeNum(m.af?.autoHL, safeNum(m.stats.hL, 1.0)), defBoost: 1.0 };
+  const afA = m.af?.impactA || { att: safeNum(m.af?.autoAL, safeNum(m.stats.aL, 1.0)), defBoost: 1.0 };
+  const hL = safeNum(ov.hL ?? afH.att, 1.0), aL = safeNum(ov.aL ?? afA.att, 1.0);
+  const hDefBoost = (ov.hL !== undefined && Math.abs(ov.hL - afH.att) > 0.005) ? 1.0 : afH.defBoost;
+  const aDefBoost = (ov.aL !== undefined && Math.abs(ov.aL - afA.att) > 0.005) ? 1.0 : afA.defBoost;
+
   const neutralAdj = { attFactor: 1.0, defFactor: 1.0, elo: null };
   const adjH = (useCal && (learningModel || st.autoCal)) ? (m.stats.adjH ?? (m.homeId ? getTeamAdj(m.homeId) : neutralAdj)) : neutralAdj;
   const adjA = (useCal && (learningModel || st.autoCal)) ? (m.stats.adjA ?? (m.awayId ? getTeamAdj(m.awayId) : neutralAdj)) : neutralAdj;
@@ -847,6 +863,8 @@ function calcPred(m, ov = {}, useCal = true, learningModel = null) {
   const hGF = safeNum(m.stats.hGF, avgH), hGA = safeNum(m.stats.hGA, avgA);
   const aGF = safeNum(m.stats.aGF, avgA), aGA = safeNum(m.stats.aGA, avgH);
   const hFF = safeNum(m.stats.hFF, 1.0), aFF = safeNum(m.stats.aFF, 1.0);
+  const fH = m.stats.formSplitH || { att: Math.sqrt(clamp(hFF, 0.90, 1.10)), def: 1 / Math.sqrt(clamp(hFF, 0.90, 1.10)) };
+  const fA = m.stats.formSplitA || { att: Math.sqrt(clamp(aFF, 0.90, 1.10)), def: 1 / Math.sqrt(clamp(aFF, 0.90, 1.10)) };
 
   let eloMult = 1.0;
   if (useCal && (learningModel || st.autoCal)) {
@@ -864,67 +882,101 @@ function calcPred(m, ov = {}, useCal = true, learningModel = null) {
     }
   }
 
-  const lamH = clamp( (hGF / avgH) * (aGA / avgH) * avgH * damp(hFF, 0.5) * hL * damp(adjH.attFactor, 0.5) * damp(adjA.defFactor, 0.5) * eloMult, 0.15, 6);
-  const lamA = clamp( (aGF / avgA) * (hGA / avgA) * avgA * damp(aFF, 0.5) * aL * damp(adjA.attFactor, 0.5) * damp(adjH.defFactor, 0.5) / eloMult, 0.15, 6);
+  const lamH = clamp((hGF / avgH) * (aGA / avgH) * avgH * damp(fH.att, 0.45) * damp(fA.def, 0.45) * hL * aDefBoost * damp(adjH.attFactor, 0.5) * damp(adjA.defFactor, 0.5) * eloMult, 0.15, 6);
+  const lamA = clamp((aGF / avgA) * (hGA / avgA) * avgA * damp(fA.att, 0.45) * damp(fH.def, 0.45) * aL * hDefBoost * damp(adjA.attFactor, 0.5) * damp(adjH.defFactor, 0.5) / eloMult, 0.15, 6);
 
-  // Sensitivity mixture: uncertain scoring intensity, not a fitted calibration.
   const sample = Math.min(safeNum(m.stats.sampleH, 0), safeNum(m.stats.sampleA, 0));
   const spread = sample >= 15 ? 0.10 : sample >= 5 ? 0.18 : 0.28;
-  const scenarios = [[1-spread,0.25],[1,0.50],[1+spread,0.25]].map(([scale,weight])=>{const lh=lamH*scale,la=lamA*scale;return {lh,la,weight,rho:Math.max(-0.08,-0.95/Math.max(lh,la)),ph:Array.from({length:25},(_,i)=>pois(i,lh)),pa:Array.from({length:25},(_,i)=>pois(i,la))};});
+  const scenarios = [[1 - spread, 0.25], [1, 0.50], [1 + spread, 0.25]].map(([scale, weight]) => {
+    const lh = lamH * scale, la = lamA * scale;
+    return { lh, la, weight, rho: Math.max(-0.08, -0.95 / Math.max(lh, la)), ph: Array.from({ length: 25 }, (_, i) => pois(i, lh)), pa: Array.from({ length: 25 }, (_, i) => pois(i, la)) };
+  });
   const scores = [];
   let totalP = 0;
   for (let i = 0; i <= 24; i++) {
     for (let j = 0; j <= 24; j++) {
       let p = 0;
-      for (const {lh,la,weight,rho,ph,pa} of scenarios) {
-        let q = ph[i]*pa[j];
-        if (i===0 && j===0) q *= 1-lh*la*rho;
-        else if (i===1 && j===0) q *= 1+la*rho;
-        else if (i===0 && j===1) q *= 1+lh*rho;
-        else if (i===1 && j===1) q *= 1-rho;
-        p += weight*q;
+      for (const { lh, la, weight, rho, ph, pa } of scenarios) {
+        let q = ph[i] * pa[j];
+        if (i === 0 && j === 0) q *= 1 - lh * la * rho;
+        else if (i === 1 && j === 0) q *= 1 + la * rho;
+        else if (i === 0 && j === 1) q *= 1 + lh * rho;
+        else if (i === 1 && j === 1) q *= 1 - rho;
+        p += weight * q;
       }
       scores.push({ i, j, p });
       totalP += p;
     }
   }
 
-  // One joint distribution for every market. Market targets are soft, then
-  // iterative proportional fitting reconciles the marginals with scorelines.
   scores.forEach(x => x.p /= totalP);
   const sumWhere = fn => scores.reduce((sum, x) => sum + (fn(x) ? x.p : 0), 0);
   const home = x => x.i > x.j, draw = x => x.i === x.j, away = x => x.i < x.j;
-  const over = x => x.i + x.j > 2;
+  const over = x => x.i + x.j > 2, golFn = x => x.i > 0 && x.j > 0;
   const rawProbs = { p1: sumWhere(home), px: sumWhere(draw), p2: sumWhere(away), pO: sumWhere(over) };
-  const ml = useCal && (learningModel || st.autoCal) ? v13Distribution(scores,m,lamH,lamA,learningModel || v13Model,m.startTs) : null;
-  const adapted = [sumWhere(home),sumWhere(draw),sumWhere(away)], adaptedO = sumWhere(over);
+  const ml = useCal && (learningModel || st.autoCal) ? v13Distribution(scores, m, lamH, lamA, learningModel || v13Model, m.startTs) : null;
+
+  const v13Probs = {
+    p1: sumWhere(home), px: sumWhere(draw), p2: sumWhere(away),
+    pO: sumWhere(over), pU: 1 - sumWhere(over), pG: sumWhere(golFn), pNG: 1 - sumWhere(golFn)
+  };
+  const v13Base = { probs: v13Probs, combos: [] };
+
+  let v14Applied = false;
+  if (useCal && !learningModel && st.autoCal && typeof v14Candidate === "function" && typeof V14_DATA !== "undefined") {
+    const cal = v14Candidate(v13Base, m.leagueName || "");
+    if (Number.isFinite(cal["1"]) && Number.isFinite(cal["X"]) && Number.isFinite(cal["2"])) {
+      const z1x2 = cal["1"] + cal["X"] + cal["2"];
+      const t1x2 = [cal["1"] / z1x2, cal["X"] / z1x2, cal["2"] / z1x2];
+      const tO = Number.isFinite(cal["Over 2.5"]) ? clamp(cal["Over 2.5"], 0.05, 0.95) : null;
+      const tG = Number.isFinite(cal["Gol"]) ? clamp(cal["Gol"], 0.05, 0.95) : null;
+      for (let n = 0; n < 20; n++) {
+        const cur1x2 = [sumWhere(home), sumWhere(draw), sumWhere(away)];
+        scores.forEach(x => { const idx = home(x) ? 0 : draw(x) ? 1 : 2; x.p *= t1x2[idx] / Math.max(1e-12, cur1x2[idx]); });
+        if (tO !== null) {
+          const curO = sumWhere(over);
+          scores.forEach(x => { x.p *= over(x) ? tO / Math.max(1e-12, curO) : (1 - tO) / Math.max(1e-12, 1 - curO); });
+        }
+        if (tG !== null) {
+          const curG = sumWhere(golFn);
+          scores.forEach(x => { x.p *= golFn(x) ? tG / Math.max(1e-12, curG) : (1 - tG) / Math.max(1e-12, 1 - curG); });
+        }
+      }
+      const normV14 = sumWhere(() => true);
+      scores.forEach(x => x.p /= normV14);
+      v14Applied = true;
+    }
+  }
+
+  const adapted = [sumWhere(home), sumWhere(draw), sumWhere(away)], adaptedO = sumWhere(over);
+  const calProbs = { "1": adapted[0], "X": adapted[1], "2": adapted[2], "Over 2.5": adaptedO, "Under 2.5": 1 - adaptedO };
+
   let marketDiv = 0;
   const odds = m.odds;
   const validMarket = odds && [odds.mktP1, odds.mktPX, odds.mktP2].every(v => Number.isFinite(v) && v > 0 && v < 1);
   if (useCal && validMarket) {
     const z = odds.mktP1 + odds.mktPX + odds.mktP2;
-    const market = [odds.mktP1/z, odds.mktPX/z, odds.mktP2/z];
-    const raw = [rawProbs.p1, rawProbs.px, rawProbs.p2];
-    marketDiv = Math.max(...raw.map((v,i) => Math.abs(v-market[i])), Number.isFinite(odds.mktPO) ? Math.abs(rawProbs.pO-odds.mktPO) : 0);
+    const market = [odds.mktP1 / z, odds.mktPX / z, odds.mktP2 / z];
+    marketDiv = Math.max(...adapted.map((v, i) => Math.abs(v - market[i])), Number.isFinite(odds.mktPO) ? Math.abs(adaptedO - odds.mktPO) : 0);
     if (st.useMarketBlend) {
-      const w = 0.28; // provisional, not fitted
-      const targets = adapted.map((v,i) => (1-w)*v+w*market[i]);
+      const w = m.lowData ? 0.65 : (m.af?.hasLineups ? 0.24 : 0.38);
+      const targets = adapted.map((v, i) => (1 - w) * v + w * market[i]);
       const hasOver = Number.isFinite(odds.mktPO) && odds.mktPO > 0 && odds.mktPO < 1;
-      const targetO = hasOver ? (1-w)*adaptedO+w*odds.mktPO : null;
-      for (let n=0; n<20; n++) {
-        const current = [sumWhere(home),sumWhere(draw),sumWhere(away)];
-        scores.forEach(x => { const i=home(x)?0:draw(x)?1:2; x.p *= targets[i]/Math.max(1e-12,current[i]); });
-        if (hasOver) { const o=sumWhere(over); scores.forEach(x => x.p *= over(x)?targetO/Math.max(1e-12,o):(1-targetO)/Math.max(1e-12,1-o)); }
+      const targetO = hasOver ? (1 - w) * adaptedO + w * odds.mktPO : null;
+      for (let n = 0; n < 20; n++) {
+        const current = [sumWhere(home), sumWhere(draw), sumWhere(away)];
+        scores.forEach(x => { const i = home(x) ? 0 : draw(x) ? 1 : 2; x.p *= targets[i] / Math.max(1e-12, current[i]); });
+        if (hasOver) { const o = sumWhere(over); scores.forEach(x => x.p *= over(x) ? targetO / Math.max(1e-12, o) : (1 - targetO) / Math.max(1e-12, 1 - o)); }
       }
     }
   }
   const norm = sumWhere(() => true); scores.forEach(x => x.p /= norm);
-  const p1=sumWhere(home), px=sumWhere(draw), p2=sumWhere(away), pO=sumWhere(over), pG=sumWhere(x=>x.i>0&&x.j>0);
-  const pO15=sumWhere(x=>x.i+x.j>=2), pU35=sumWhere(x=>x.i+x.j<=3);
-  const p1X_O15=sumWhere(x=>x.i>=x.j&&x.i+x.j>=2), pX2_O15=sumWhere(x=>x.j>=x.i&&x.i+x.j>=2);
-  const p1X_U35=sumWhere(x=>x.i>=x.j&&x.i+x.j<=3), pX2_U35=sumWhere(x=>x.j>=x.i&&x.i+x.j<=3);
-  const pMG13=sumWhere(x=>x.i+x.j>=1&&x.i+x.j<=3), pMG24=sumWhere(x=>x.i+x.j>=2&&x.i+x.j<=4);
-  const pHomeG=sumWhere(x=>x.i>=1), pAwayG=sumWhere(x=>x.j>=1);
+  const p1 = sumWhere(home), px = sumWhere(draw), p2 = sumWhere(away), pO = sumWhere(over), pG = sumWhere(golFn);
+  const pO15 = sumWhere(x => x.i + x.j >= 2), pU35 = sumWhere(x => x.i + x.j <= 3);
+  const p1X_O15 = sumWhere(x => x.i >= x.j && x.i + x.j >= 2), pX2_O15 = sumWhere(x => x.j >= x.i && x.i + x.j >= 2);
+  const p1X_U35 = sumWhere(x => x.i >= x.j && x.i + x.j <= 3), pX2_U35 = sumWhere(x => x.j >= x.i && x.i + x.j <= 3);
+  const pMG13 = sumWhere(x => x.i + x.j >= 1 && x.i + x.j <= 3), pMG24 = sumWhere(x => x.i + x.j >= 2 && x.i + x.j <= 4);
+  const pHomeG = sumWhere(x => x.i >= 1), pAwayG = sumWhere(x => x.j >= 1);
 
   const topScores = scores.sort((a, b) => b.p - a.p).slice(0, 3).map(s => ({ score: `${s.i}-${s.j}`, prob: s.p }));
   const best1X2 = [
@@ -946,23 +998,39 @@ function calcPred(m, ov = {}, useCal = true, learningModel = null) {
     { code: "No Gol", cat: "GOALS", label: "Almeno una a zero", prob: 1 - pG }
   ].reduce((b, c) => c.prob > b.prob ? c : b);
 
-  // Select by estimated success probability; data quality is separate.
-  const bestPick = [best1X2, bestDC, bestGoals].reduce((b,c)=>c.prob>b.prob?c:b);
-  const ouPick = pO >= 0.5 ? { code: "Over 2.5", prob: pO, isOver: true } : { code: "Under 2.5", prob: 1-pO, isOver: false };
-  const quality = clamp(0.70*safeNum(m.stats.comp,0.35)+0.30*(1-clamp(safeNum(m.stats.vol,0.5),0,1)),0,1);
-  const conf = Math.round(100*clamp(quality-(m.lowData?0.20:0)-Math.min(0.20,marketDiv*0.7),0,1));
+  const bestPick = [best1X2, bestDC, bestGoals].reduce((b, c) => c.prob > b.prob ? c : b);
+  const ouPick = pO >= 0.5 ? { code: "Over 2.5", prob: pO, isOver: true } : { code: "Under 2.5", prob: 1 - pO, isOver: false };
+  const effVol = clamp(safeNum(m.stats.vol, 0.5) - (m.af?.hasLineups ? 0.04 : 0), 0, 1);
+  const quality = clamp(0.70 * safeNum(m.stats.comp, 0.35) + 0.30 * (1 - effVol), 0, 1);
+  const conf = Math.round(100 * clamp(quality - (m.lowData ? 0.20 : 0) - Math.min(0.20, marketDiv * 0.7), 0, 1));
   const rankScore = bestPick.prob * conf;
-  const eligible = bestPick.prob >= 0.75 && conf >= 75 && !m.lowData && marketDiv < 0.14;
+
+  const bestOddForPick = m.odds?.best?.[bestPick.code]?.odd;
+  const priceOk = !bestOddForPick || (bestOddForPick * bestPick.prob >= 0.94);
+  const eligible = bestPick.prob >= 0.74 && conf >= 75 && !m.lowData && marketDiv < 0.14 && priceOk;
 
   let bestValue = null;
-  if (m.odds?.best && conf >= 75 && marketDiv < 0.14) {
-    const probByCode = { "1": p1, "X": px, "2": p2, "Over 2.5": pO, "Under 2.5": 1 - pO };
-    Object.entries(probByCode).forEach(([code, prob]) => {
+  if (m.odds?.best) {
+    const sharpMap = m.odds.mktP1 ? {
+      "1": m.odds.mktP1, "X": m.odds.mktPX, "2": m.odds.mktP2,
+      ...(Number.isFinite(m.odds.mktPO) ? { "Over 2.5": m.odds.mktPO, "Under 2.5": m.odds.mktPU } : {})
+    } : {};
+    Object.entries(calProbs).forEach(([code, modelProb]) => {
       const bObj = m.odds.best[code];
-      if (!bObj || prob < 0.22) return;
-      const ev = prob * bObj.odd - 1;
-      if (ev >= 0.05 && (!bestValue || ev > bestValue.ev)) {
-        bestValue = { code, prob, odd: bObj.odd, book: bObj.book, ev };
+      if (!bObj) return;
+      const sharpP = sharpMap[code];
+      if (Number.isFinite(sharpP) && sharpP >= 0.18) {
+        const sharpEv = sharpP * bObj.odd - 1;
+        if (sharpEv >= 0.025 && (!bestValue || sharpEv > bestValue.ev)) {
+          bestValue = { code, prob: sharpP, odd: bObj.odd, book: bObj.book, ev: sharpEv, sharp: true };
+          return;
+        }
+      }
+      if (conf >= 72 && marketDiv < 0.14 && modelProb >= 0.22) {
+        const modelEv = modelProb * bObj.odd - 1;
+        if (modelEv >= 0.05 && (!bestValue || (!bestValue.sharp && modelEv > bestValue.ev))) {
+          bestValue = { code, prob: modelProb, odd: bObj.odd, book: bObj.book, ev: modelEv, sharp: false };
+        }
       }
     });
   }
@@ -981,8 +1049,9 @@ function calcPred(m, ov = {}, useCal = true, learningModel = null) {
   return {
     lamH: lamH.toFixed(2), lamA: lamA.toFixed(2),
     probs: { p1, px, p2, pO, pU: 1 - pO, pG, pNG: 1 - pG },
-    rawProbs, marketDiv, bestValue,
-    bestPick, best1X2, ouPick, topScores, combos, confidence: conf, rankScore, eligible, modelVersion: "13.0", calibrated: Boolean(ml?.active), ml: learningModel ? ml : undefined, mlActive: Boolean(ml?.active)
+    rawProbs, v13Base, v14Applied, marketDiv, bestValue,
+    bestPick, best1X2, ouPick, topScores, combos, confidence: conf, rankScore, eligible,
+    modelVersion: "13.0", calibrated: Boolean(ml?.active || v14Applied), ml: learningModel ? ml : undefined, mlActive: Boolean(ml?.active)
   };
 }
 
@@ -1112,7 +1181,7 @@ function targetDateKey(offset) {
 }
 
 function renderTeamLeaderboard() {
-  v13Status(); v13LiveStatus(); if(typeof v14Render === "function") { try { v14Render(); } catch(e) { console.warn("V14 shadow render",e); } }
+  v13Status(); v13LiveStatus(); if (typeof v14Render === "function") { try { v14Render(); } catch (e) { console.warn("V14 shadow render", e); } }
   const raw = getTeamHist(), q = document.getElementById("teamHistSearch").value.trim().toLowerCase();
   const minM = Number(document.getElementById("minMatchesFilter").value), all = Object.values(raw);
   const tot = all.reduce((s, x) => s + x.tot, 0), hits = all.reduce((s, x) => s + x.hit, 0), ouHits = all.reduce((s, x) => s + x.ou, 0);
@@ -1132,10 +1201,10 @@ function renderTeamLeaderboard() {
       if (x.h !== 1 || !Number.isFinite(x.pr)) return;
       if (x.eventId && seenEvents.has(x.eventId)) return;
       if (x.eventId) seenEvents.add(x.eventId);
-      if (x.modelVersion === "13.0") Object.entries(x.markets || {}).forEach(([code,v]) => {
-        if (!Number.isFinite(v.p) || ![0,1].includes(v.y)) return;
-        const r = exactMarkets[code] ||= {n:0,p:0,y:0,b:0};
-        r.n++; r.p+=v.p; r.y+=v.y; r.b+=(v.p-v.y)**2;
+      if (x.modelVersion === "13.0") Object.entries(x.markets || {}).forEach(([code, v]) => {
+        if (!Number.isFinite(v.p) || ![0, 1].includes(v.y)) return;
+        const r = exactMarkets[code] ||= { n: 0, p: 0, y: 0, b: 0 };
+        r.n++; r.p += v.p; r.y += v.y; r.b += (v.p - v.y) ** 2;
       });
       uniqueM++; brierSum += Math.pow(x.pr - x.ph, 2);
       if (Number.isFinite(x.b1x2)) { b1x2Sum += x.b1x2; b1x2Cnt++; }
@@ -1171,7 +1240,7 @@ function renderTeamLeaderboard() {
           const exp = b.n ? Math.round((b.pSum / b.n) * 100) + "%" : "-";
           return `<div class="p-1.5 rounded-lg bg-slate-900/70"><div class="text-[9px] text-slate-400">Prev. ${b.label}</div><div class="font-bold text-emerald-400">${real} <span class="text-[9px] text-slate-500 font-normal">vs ${exp}</span></div></div>`;
         }).join("")}
-      </div>${marketBriers}<div class="pt-2 border-t border-slate-800"><strong>Diagnostica V13 per mercato (backtest cronologico)</strong>${Object.entries(exactMarkets).map(([code,r])=>`<div>${esc(code)} • n=${r.n} • previsto ${(100*r.p/r.n).toFixed(1)}% • osservato ${(100*r.y/r.n).toFixed(1)}% • Brier ${(r.b/r.n).toFixed(3)}</div>`).join("") || " — rigenera lo storico"}</div>`;
+      </div>${marketBriers}<div class="pt-2 border-t border-slate-800"><strong>Diagnostica per mercato (backtest cronologico)</strong>${Object.entries(exactMarkets).map(([code, r]) => `<div>${esc(code)} • n=${r.n} • previsto ${(100 * r.p / r.n).toFixed(1)}% • osservato ${(100 * r.y / r.n).toFixed(1)}% • Brier ${(r.b / r.n).toFixed(3)}</div>`).join("") || " — rigenera lo storico"}</div>`;
   } else {
     calBox.classList.add("hidden");
   }
@@ -1254,6 +1323,10 @@ function renderDiario() {
   const won = closed.filter(b => b.status === "won").length;
   const staked = closed.reduce((s, b) => s + b.stake, 0);
   const net = closed.reduce((s, b) => s + (b.status === "won" ? b.stake * (b.odd - 1) : -b.stake), 0);
+  const clvList = BET_LOG.filter(b => Number.isFinite(b.sharpProbAtBet) && Number.isFinite(b.closingSharpProb) && b.sharpProbAtBet > 0);
+  const avgClv = clvList.length
+    ? clvList.reduce((s, b) => s + ((b.closingSharpProb / b.sharpProbAtBet) - 1), 0) / clvList.length
+    : null;
 
   document.getElementById("dCount").textContent = `${closed.length}/${BET_LOG.length}`;
   document.getElementById("dWinRate").textContent = closed.length ? `${Math.round(won / closed.length * 100)}%` : "-";
@@ -1268,8 +1341,21 @@ function renderDiario() {
     return;
   }
 
-  box.innerHTML = BET_LOG.slice().reverse().map(b => {
+  const clvSummaryHtml = avgClv !== null
+    ? `<div class="glass rounded-xl px-3 py-2 text-[11px] flex justify-between items-center border ${avgClv >= 0 ? 'border-emerald-500/30 text-emerald-300' : 'border-rose-500/30 text-rose-300'}">
+        <span>📈 Closing Line Value (CLV medio su ${clvList.length} giocate):</span>
+        <strong>${avgClv >= 0 ? '+' : ''}${(avgClv * 100).toFixed(2)}%</strong>
+      </div>`
+    : "";
+
+  box.innerHTML = clvSummaryHtml + BET_LOG.slice().reverse().map(b => {
     const netWon = b.stake * (b.odd - 1);
+    const clvBadge = (Number.isFinite(b.sharpProbAtBet) && Number.isFinite(b.closingSharpProb) && b.sharpProbAtBet > 0)
+      ? (() => {
+          const clv = ((b.closingSharpProb / b.sharpProbAtBet) - 1) * 100;
+          return `<span class="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold ${clv >= 0 ? 'bg-emerald-500/15 text-emerald-300' : 'bg-rose-500/15 text-rose-300'}">CLV ${clv >= 0 ? '+' : ''}${clv.toFixed(1)}%</span>`;
+        })()
+      : "";
     const stBadge = b.status === "won"
       ? (netWon >= 0
           ? `<span class="text-emerald-400 font-bold">✅ VINTA (+${netWon.toFixed(2)}u)</span>`
@@ -1282,7 +1368,7 @@ function renderDiario() {
         <div class="min-w-0">
           <div class="text-[10px] text-slate-400">${esc(b.date)} • ${esc(b.league)}</div>
           <div class="font-bold text-white truncate">${esc(b.match)}</div>
-          <div class="text-[11px] text-cyan-300 font-semibold">${esc(b.code)} @${b.odd.toFixed(2)} • Puntata: ${b.stake}u</div>
+          <div class="text-[11px] text-cyan-300 font-semibold">${esc(b.code)} @${b.odd.toFixed(2)} • Puntata: ${b.stake}u${clvBadge}</div>
         </div>
         <div class="text-right shrink-0">${stBadge}</div>
       </div>

@@ -14,7 +14,8 @@ function v14Capture(m){
   if(typeof V14_DATA === "undefined" || !m.prediction || m.stateType!=='pre' || Date.now()>=m.startTs)return;
   const snap=predictionSnapshots[String(m.id)+':'+String(m.startTs)];
   if(!snap || snap.v14 || m.startTs<=Date.parse(V14_DATA.report.end+'T23:59:59Z'))return;
-  snap.v14={version:1,capturedAt:Date.now(),base:buildPickMap(m.prediction),candidate:v14Candidate(m.prediction,m.leagueName),league:m.leagueName};
+  const src = m.prediction.v13Base || m.prediction;
+  snap.v14={version:1,capturedAt:Date.now(),base:buildPickMap(src),candidate:v14Candidate(src,m.leagueName),league:m.leagueName};
 }
 function v14Render(){
   const el=document.getElementById('v14Panel');if(!el)return; if(typeof V14_DATA === 'undefined'){el.textContent='Modello V14 non caricato: controllare v14-model.js.';return;}

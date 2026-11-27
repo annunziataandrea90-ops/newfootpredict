@@ -8,32 +8,48 @@ const dayOffset = () => st.tab === "ieri" ? -1 : st.tab === "oggi" ? 0 : 1;
 const SNAP_KEY = "fp_prematch_snapshots_v13";
 function loadSnapshots() { try { return JSON.parse(localStorage.getItem(SNAP_KEY) || "{}") || {}; } catch { return {}; } }
 let predictionSnapshots = loadSnapshots(), v13SnapshotReady = false;
-async function v13LoadSnapshots(){try{const saved=await idbGet(SNAP_KEY);if(saved&&typeof saved==='object')predictionSnapshots={...predictionSnapshots,...saved};}catch(e){console.warn('Snapshot load',e);}v13SnapshotReady=true;}
-function v13LiveStatus(){const el=document.getElementById('v13LiveStatus');if(!el)return;let n=0,b=0,hits=0,latestB=0,latestHits=0;for(const s of Object.values(predictionSnapshots)){if(!s.result||!s.prediction||!s.latest?.prediction)continue;const {h,a}=s.result;const calc=p=>{const map=buildPickMap(p),keys=['1','X','2','Over 1.5','Over 2.5','Under 3.5','Gol'];return [keys.reduce((sum,k)=>sum+(map[k]-Number(isHit(k,h,a)))**2,0)/keys.length,Number(isHit(p.bestPick.code,h,a))];};const x=calc(s.prediction),y=calc(s.latest.prediction);if(!Number.isFinite(x[0])||!Number.isFinite(y[0]))continue;n++;b+=x[0];hits+=x[1];latestB+=y[0];latestHits+=y[1];}el.textContent=n?`Verifica live (ultimi 180 giorni): ${n} match | prima previsione: ${(100*hits/n).toFixed(1)}% / Brier ${(b/n).toFixed(4)} | ultima: ${(100*latestHits/n).toFixed(1)}% / Brier ${(latestB/n).toFixed(4)}`:'Verifica live: nessun risultato associato a snapshot pre-partita V13.';}
+async function v13LoadSnapshots() { try { const saved = await idbGet(SNAP_KEY); if (saved && typeof saved === 'object') predictionSnapshots = { ...predictionSnapshots, ...saved }; } catch (e) { console.warn('Snapshot load', e); } v13SnapshotReady = true; }
+function v13LiveStatus() { const el = document.getElementById('v13LiveStatus'); if (!el) return; let n = 0, b = 0, hits = 0, latestB = 0, latestHits = 0; for (const s of Object.values(predictionSnapshots)) { if (!s.result || !s.prediction || !s.latest?.prediction) continue; const { h, a } = s.result; const calc = p => { const map = buildPickMap(p), keys = ['1', 'X', '2', 'Over 1.5', 'Over 2.5', 'Under 3.5', 'Gol']; return [keys.reduce((sum, k) => sum + (map[k] - Number(isHit(k, h, a))) ** 2, 0) / keys.length, Number(isHit(p.bestPick.code, h, a))]; }; const x = calc(s.prediction), y = calc(s.latest.prediction); if (!Number.isFinite(x[0]) || !Number.isFinite(y[0])) continue; n++; b += x[0]; hits += x[1]; latestB += y[0]; latestHits += y[1]; } el.textContent = n ? `Verifica live (ultimi 180 giorni): ${n} match | prima previsione: ${(100 * hits / n).toFixed(1)}% / Brier ${(b / n).toFixed(4)} | ultima: ${(100 * latestHits / n).toFixed(1)}% / Brier ${(latestB / n).toFixed(4)}` : 'Verifica live: nessun risultato associato a snapshot pre-partita V13.'; }
 
 function recalcAllPredictions() {
-  const now = Date.now(); let changed = false;
+  const now = Date.now(); let changed = false, betChanged = false;
   LEAGUES.forEach(l => l.matches.forEach(m => {
     const key = String(m.id) + ":" + String(m.startTs);
     const snap = predictionSnapshots[key];
     if (m.stateType === "pre" && Number.isFinite(m.startTs) && now < m.startTs) {
       m.prediction = calcPred(m); m.predictionVerified = v13SnapshotReady;
-      if(!v13SnapshotReady)return;
-      // Keep the first pre-match prediction immutable, independently of later simulations.
+      if (!v13SnapshotReady) return;
       if (!snap) { predictionSnapshots[key] = { capturedAt: now, startTs: m.startTs, prediction: m.prediction }; changed = true; }
-      // Preserve first forecast; separately retain latest strictly pre-match forecast.
-      predictionSnapshots[key].latest = { capturedAt: now, prediction: m.prediction }; if(typeof v14Capture === "function") { try { v14Capture(m); } catch(e) { console.warn("V14 shadow capture",e); } } changed = true;
+      predictionSnapshots[key].latest = { capturedAt: now, prediction: m.prediction };
+      if (m.odds?.mktP1 && (m.startTs - now) <= 30 * 60 * 1000) {
+        const closingMap = {
+          "1": m.odds.mktP1, "X": m.odds.mktPX, "2": m.odds.mktP2,
+          ...(Number.isFinite(m.odds.mktPO) ? { "Over 2.5": m.odds.mktPO, "Under 2.5": m.odds.mktPU } : {})
+        };
+        predictionSnapshots[key].closingSharp = closingMap;
+        BET_LOG.forEach(b => {
+          if (b.status === "pending" && b.matchId === m.id && Number.isFinite(closingMap[b.code]) && b.closingSharpProb !== closingMap[b.code]) {
+            b.closingSharpProb = closingMap[b.code];
+            betChanged = true;
+          }
+        });
+      }
+      if (typeof v14Capture === "function") { try { v14Capture(m); } catch (e) { console.warn("V14 shadow capture", e); } }
+      changed = true;
     } else {
       m.predictionVerified = Boolean(snap && snap.capturedAt < m.startTs);
       m.prediction = m.predictionVerified ? snap.prediction : calcPred(m);
-      if(m.predictionVerified && m.stateType==='post' && m.statusTxt==='FIN' && m.hasScore && !m.isExtra && Number.isInteger(m.hScore) && Number.isInteger(m.aScore) && m.hScore>=0 && m.aScore>=0){if(snap.result?.h!==m.hScore||snap.result?.a!==m.aScore){snap.result={h:m.hScore,a:m.aScore};changed=true;}}
+      if (m.predictionVerified && m.stateType === 'post' && m.statusTxt === 'FIN' && m.hasScore && !m.isExtra && Number.isInteger(m.hScore) && Number.isInteger(m.aScore) && m.hScore >= 0 && m.aScore >= 0) {
+        if (snap.result?.h !== m.hScore || snap.result?.a !== m.aScore) { snap.result = { h: m.hScore, a: m.aScore }; changed = true; }
+      }
     }
   }));
+  if (betChanged) saveBetLog();
   if (changed && v13SnapshotReady) {
-    for(const [k,v] of Object.entries(predictionSnapshots))if(v.startTs<now-180*86400000)delete predictionSnapshots[k];
-    idbSet(SNAP_KEY,predictionSnapshots).catch(e=>{console.warn('Snapshot non salvato',e);const el=document.getElementById('v13LiveStatus');if(el)el.textContent='Errore persistenza snapshot: controllare spazio e IndexedDB.';});
+    for (const [k, v] of Object.entries(predictionSnapshots)) if (v.startTs < now - 180 * 86400000) delete predictionSnapshots[k];
+    idbSet(SNAP_KEY, predictionSnapshots).catch(e => { console.warn('Snapshot non salvato', e); const el = document.getElementById('v13LiveStatus'); if (el) el.textContent = 'Errore persistenza snapshot: controllare spazio e IndexedDB.'; });
   }
-  v13LiveStatus(); if(typeof v14Render === "function") { try { v14Render(); } catch(e) { console.warn("V14 shadow render",e); } }
+  v13LiveStatus(); if (typeof v14Render === "function") { try { v14Render(); } catch (e) { console.warn("V14 shadow render", e); } }
 }
 
 function updateApiStatusBars(customOdds = null, customAf = null) {
@@ -247,7 +263,7 @@ async function loadDay(offset, force = false) {
     const tot = LEAGUES.reduce((s, l) => s + l.matches.length, 0);
     badge.textContent = "LIVE REALE";
     badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
-    sub.textContent = `${tot} partite (${dp.slice(6,8)}/${dp.slice(4,6)}) • Cache veloce`;
+    sub.textContent = `${tot} partite (${dp.slice(6, 8)}/${dp.slice(4, 6)}) • Cache veloce`;
     syncSlipFromLeagues();
     updateApiStatusBars();
     renderSchedule();
@@ -370,10 +386,12 @@ async function loadDay(offset, force = false) {
           statSourceH: hs ? `${hs.source} (${hs.played}g)` : "Default",
           statSourceA: as ? `${as.source} (${as.played}g)` : "Default",
           stats: {
-            avgH: effAvgH, avgA: effAvgA, sampleH: hEffGp, sampleA: aEffGp, restDiff: v13Rest(hId,aId,startTs),
+            avgH: effAvgH, avgA: effAvgA, sampleH: hEffGp, sampleA: aEffGp, restDiff: v13Rest(hId, aId, startTs),
             hGF: Number(safeNum(hGF, effAvgH).toFixed(2)), hGA: Number(safeNum(hGA, effAvgA).toFixed(2)),
             aGF: Number(safeNum(aGF, effAvgA).toFixed(2)), aGA: Number(safeNum(aGA, effAvgH).toFixed(2)),
             hFF: hf.factor, aFF: af.factor, hL: 1.0, aL: 1.0,
+            formSplitH: getSplitForm(hId, hf.factor, effAvgH, effAvgA),
+            formSplitA: getSplitForm(aId, af.factor, effAvgA, effAvgH),
             isCrossLeague: b.kind !== "Campionato", domSlugH, domSlugA, tierH, tierA,
             comp: ok ? 0.92 : (home.form && away.form ? 0.72 : 0.54), vol: baseVol
           }
@@ -396,7 +414,7 @@ async function loadDay(offset, force = false) {
     const nowStr = new Date().toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
     badge.textContent = "LIVE REALE";
     badge.className = "text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
-    sub.textContent = `${tot} partite (${dp.slice(6,8)}/${dp.slice(4,6)}) • Agg. ${nowStr}`;
+    sub.textContent = `${tot} partite (${dp.slice(6, 8)}/${dp.slice(4, 6)}) • Agg. ${nowStr}`;
     syncSlipFromLeagues();
     updateApiStatusBars();
     renderSchedule();
@@ -439,7 +457,7 @@ function parseMonthEvents(events, slug, compName, kind, flag, targetMap) {
     const home = (comp.competitors || []).find(c => c.homeAway === "home");
     const away = (comp.competitors || []).find(c => c.homeAway === "away");
     const hasScore = home?.score !== undefined && home?.score !== "" && away?.score !== undefined && away?.score !== "";
-    if (stType?.state === "post" && stType?.completed !== false && !/CANCEL|POSTPON|ABANDON|SUSPEND|FORFEIT|AWARD/i.test(stType?.name||"") && !isExtra && hasScore && home?.team?.id && away?.team?.id) {
+    if (stType?.state === "post" && stType?.completed !== false && !/CANCEL|POSTPON|ABANDON|SUSPEND|FORFEIT|AWARD/i.test(stType?.name || "") && !isExtra && hasScore && home?.team?.id && away?.team?.id) {
       const ts = new Date(ev.date).getTime();
       if (Number.isFinite(ts)) {
         targetMap.set(ev.id, {
@@ -510,7 +528,7 @@ window.scanSeason = async totalDays => {
       } else {
         stEl.textContent = `Scarico mese ${mIdx + 1}/${months.length} (${ym.slice(4)}/${ym.slice(0, 4)}) • ${evMap.size.toLocaleString("it-IT")} match...`;
         const mDedup = new Map();
-        let mFatalErr = 0; const monthErrorsBefore=reqErr;
+        let mFatalErr = 0; const monthErrorsBefore = reqErr;
         await mapWithConcurrency(COMPS, 6, async ([slug, compName, kind, flag]) => {
           if (scanAborted) return;
           try {
@@ -531,7 +549,7 @@ window.scanSeason = async totalDays => {
       }
 
       mRecords.forEach(rec => {
-        if (rec.ts >= minTs && rec.ts <= maxTs && rec.ts+4*3600000 <= Date.now() && !evMap.has(rec.id)) evMap.set(rec.id, rec);
+        if (rec.ts >= minTs && rec.ts <= maxTs && rec.ts + 4 * 3600000 <= Date.now() && !evMap.has(rec.id)) evMap.set(rec.id, rec);
       });
       pBar.style.width = `${Math.round(((mIdx + 1) / (months.length + 1)) * 100)}%`;
     }
@@ -547,19 +565,26 @@ window.scanSeason = async totalDays => {
     stEl.textContent = `Analizzo ${allEvents.length.toLocaleString("it-IT")} match + calcolo rating ELO storico...`;
     await sleep(20);
 
-    const rolling = {}, leagueRoll = {}, eloMap = {}, teams = {};
+    const rolling = {}, leagueRoll = {}, eloMap = {}, domSlugMap = {}, teams = {};
     const initRoll = () => ({ played: 0, gf: 0, ga: 0, hP: 0, hGf: 0, hGa: 0, aP: 0, aGf: 0, aGa: 0, pts: [], res: [], lastTs: 0 });
     const getRoll = id => rolling[id] || initRoll();
     const getElo = (id, slug) => eloMap[id] ?? (LEAGUE_TIER[slug]?.elo ?? 1470);
     const formFactor = arr => !arr.length ? 1.0 : 0.88 + (arr.slice(-5).reduce((a, b) => a + b, 0) / (Math.min(5, arr.length) * 3)) * 0.24;
-    const calcRollAdj = r => {
-      if (!r.res || r.res.length < 5) return { attFactor: 1.0, defFactor: 1.0 };
-      const sl = r.res.slice(-15);
-      let rGf = 0, rGa = 0, rEgf = 0, rEga = 0;
-      sl.forEach(x => { rGf += x.gf; rGa += x.ga; rEgf += x.egf; rEga += x.ega; });
+    const calcRollAdj = () => ({ attFactor: 1.0, defFactor: 1.0 });
+    const calcRollSplitForm = (r, avgFor, avgAg) => {
+      if (!r.res || r.res.length < 4) {
+        const rel = formFactor(r.pts);
+        return { att: Math.sqrt(rel), def: 1 / Math.sqrt(rel) };
+      }
+      const sl = r.res.slice(-8);
+      let wSum = 0, gfW = 0, gaW = 0;
+      sl.forEach((x, idx) => {
+        const w = Math.pow(0.82, sl.length - 1 - idx);
+        wSum += w; gfW += x.gf * w; gaW += x.ga * w;
+      });
       return {
-        attFactor: clamp((rGf + 4.0) / Math.max(1.0, rEgf + 4.0), 0.90, 1.10),
-        defFactor: clamp((rGa + 4.0) / Math.max(1.0, rEga + 4.0), 0.90, 1.10)
+        att: clamp(((gfW / wSum) * sl.length + avgFor * 5) / ((sl.length + 5) * avgFor), 0.82, 1.22),
+        def: clamp(((gaW / wSum) * sl.length + avgAg * 5) / ((sl.length + 5) * avgAg), 0.82, 1.22)
       };
     };
     const decayRoll = r => ({
@@ -570,30 +595,25 @@ window.scanSeason = async totalDays => {
     });
 
     const learner = v13Fresh(); const pending = []; let queueHead = 0, processed = 0;
-    // A four-hour result-availability embargo: never expose a score at its kickoff.
-    const release = at => { while(queueHead<pending.length && pending[queueHead].ready<=at){const x=pending[queueHead++];x.update();x.update=null;if(x.obs){v13Learn(learner,x.obs,x.h,x.a);learner.through=Math.max(learner.through,x.ready);x.obs=null;}} };
+    const release = at => { while (queueHead < pending.length && pending[queueHead].ready <= at) { const x = pending[queueHead++]; x.update(); x.update = null; if (x.obs) { v13Learn(learner, x.obs, x.h, x.a); learner.through = Math.max(learner.through, x.ready); x.obs = null; } } };
     for (const rec of allEvents) {
       const { hId, aId, hName, aName, hScore, aScore, ts: evTs, date, slug, compName, kind, flag } = rec;
       if (!Number.isFinite(hScore) || !Number.isFinite(aScore)) continue;
       release(evTs); let trainObs = null;
-      if(++processed%200===0){stEl.textContent=`Backtest V13: ${processed.toLocaleString('it-IT')}/${allEvents.length.toLocaleString('it-IT')} partite`;await sleep(0);if(scanAborted)break;}
+      if (++processed % 200 === 0) { stEl.textContent = `Backtest V13: ${processed.toLocaleString('it-IT')}/${allEvents.length.toLocaleString('it-IT')} partite`; await sleep(0); if (scanAborted) break; }
 
       const lr = leagueRoll[slug] || { m: 0, hGf: 0, aGf: 0 };
       const avgH = Number(clamp((lr.hGf + 1.48 * 10) / (lr.m + 10), 0.90, 2.30).toFixed(3));
       const avgA = Number(clamp((lr.aGf + 1.18 * 10) / (lr.m + 10), 0.70, 2.00).toFixed(3));
 
       let hr = getRoll(hId), ar = getRoll(aId);
-      const tierBase = LEAGUE_TIER[slug]?.elo ?? 1470;
-      if (hr.lastTs && (evTs - hr.lastTs) > 3888000000) {
-        hr = decayRoll(hr);
+      if (hr.lastTs && (evTs - hr.lastTs) > 3888000000) hr = decayRoll(hr);
+      if (ar.lastTs && (evTs - ar.lastTs) > 3888000000) ar = decayRoll(ar);
 
-      }
-      if (ar.lastTs && (evTs - ar.lastTs) > 3888000000) {
-        ar = decayRoll(ar);
-
-      }
-
-      const eloH = hr.lastTs && evTs-hr.lastTs>3888000000 ? getElo(hId,slug)*0.78+tierBase*0.22 : getElo(hId,slug), eloA = ar.lastTs && evTs-ar.lastTs>3888000000 ? getElo(aId,slug)*0.78+tierBase*0.22 : getElo(aId,slug);
+      const domH = domSlugMap[hId] || slug, domA = domSlugMap[aId] || slug;
+      const tierBaseH = LEAGUE_TIER[domH]?.elo ?? 1470, tierBaseA = LEAGUE_TIER[domA]?.elo ?? 1470;
+      const eloH = hr.lastTs && evTs - hr.lastTs > 3888000000 ? getElo(hId, domH) * 0.78 + tierBaseH * 0.22 : getElo(hId, domH);
+      const eloA = ar.lastTs && evTs - ar.lastTs > 3888000000 ? getElo(aId, domA) * 0.78 + tierBaseA * 0.22 : getElo(aId, domA);
       let resH = hr.res, resA = ar.res;
 
       if (hr.played >= 2 && ar.played >= 2) {
@@ -603,16 +623,18 @@ window.scanSeason = async totalDays => {
         const rawAGA = ar.aP >= 3 ? (ar.aGa / ar.aP) : (ar.ga / ar.played) * 1.08;
 
         const fake = {
-          home: hName, away: aName, slug, startTs: evTs,
+          home: hName, away: aName, slug, leagueName: compName, startTs: evTs,
           stats: {
-            avgH, avgA, sampleH: hr.hP, sampleA: ar.aP, restDiff: hr.lastTs && ar.lastTs ? (ar.lastTs-hr.lastTs)/86400000 : 0,
+            avgH, avgA, sampleH: hr.hP, sampleA: ar.aP, restDiff: hr.lastTs && ar.lastTs ? (ar.lastTs - hr.lastTs) / 86400000 : 0,
             hGF: shrink(rawHGF, hr.hP >= 3 ? hr.hP : hr.played, avgH, 5),
             hGA: shrink(rawHGA, hr.hP >= 3 ? hr.hP : hr.played, avgA, 5),
             aGF: shrink(rawAGF, ar.aP >= 3 ? ar.aP : ar.played, avgA, 5),
             aGA: shrink(rawAGA, ar.aP >= 3 ? ar.aP : ar.played, avgH, 5),
             hFF: formFactor(hr.pts), aFF: formFactor(ar.pts), hL: 1.0, aL: 1.0,
-            adjH: calcRollAdj(hr), adjA: calcRollAdj(ar),
-            isCrossLeague: kind !== "Campionato", eloH, eloA,
+            formSplitH: calcRollSplitForm(hr, avgH, avgA),
+            formSplitA: calcRollSplitForm(ar, avgA, avgH),
+            adjH: calcRollAdj(), adjA: calcRollAdj(),
+            isCrossLeague: kind !== "Campionato", domSlugH: domH, domSlugA: domA, eloH, eloA,
             comp: hr.played >= 5 && ar.played >= 5 ? 0.91 : 0.74, vol: 0.22
           }
         };
@@ -646,7 +668,7 @@ window.scanSeason = async totalDays => {
             ts: evTs, d: date.slice(0, 10), c: compName, k: kind, f: flag, oid: oppId, h: isHome ? 1 : 0,
             t: isHome ? `${tName} - ${opp}` : `${opp} - ${tName}`, s: `${hScore}-${aScore}`,
             p: pred.bestPick.code, cat, pr, ph, o: pred.ouPick.code, oh,
-            b1x2, bOu, markets: Object.fromEntries(Object.entries(buildPickMap(pred)).map(([code,p]) => [code, {p, y: Number(isHit(code,hScore,aScore))}])), modelVersion: "13.0", eventId: rec.id, eligible: pred.eligible, gf: myGf, ga: myGa, egf: myEgf, ega: myEga
+            b1x2, bOu, markets: Object.fromEntries(Object.entries(buildPickMap(pred)).map(([code, p]) => [code, { p, y: Number(isHit(code, hScore, aScore)) }])), modelVersion: "13.0", eventId: rec.id, eligible: pred.eligible, gf: myGf, ga: myGa, egf: myEgf, ega: myEga
           });
         };
         pushRec(hId, hName, aId, aName, true);
@@ -656,21 +678,24 @@ window.scanSeason = async totalDays => {
       const expH = 1 / (1 + Math.pow(10, (eloA - (eloH + 55)) / 400));
       const actH = hScore > aScore ? 1 : hScore === aScore ? 0.5 : 0;
       const kElo = (kind === "Coppa" ? 26 : 20) * Math.max(1, Math.log(Math.abs(hScore - aScore) + 1) * 1.15);
-      pending.push({ready:evTs+4*3600000,obs:trainObs,h:hScore,a:aScore,update:() => {
-      eloMap[hId] = eloH + kElo * (actH - expH);
-      eloMap[aId] = eloA + kElo * ((1 - actH) - (1 - expH));
+      pending.push({
+        ready: evTs + 4 * 3600000, obs: trainObs, h: hScore, a: aScore, update: () => {
+          eloMap[hId] = eloH + kElo * (actH - expH);
+          eloMap[aId] = eloA + kElo * ((1 - actH) - (1 - expH));
+          if (kind === "Campionato") { domSlugMap[hId] = slug; domSlugMap[aId] = slug; }
 
-      const currentLeague=leagueRoll[slug]||{m:0,hGf:0,aGf:0};
-      leagueRoll[slug] = { m: currentLeague.m + 1, hGf: currentLeague.hGf + hScore, aGf: currentLeague.aGf + aScore };
-      const hp = hScore > aScore ? 3 : hScore === aScore ? 1 : 0;
-      const ap = aScore > hScore ? 3 : aScore === hScore ? 1 : 0;
-      rolling[hId] = { ...hr, played: hr.played + 1, gf: hr.gf + hScore, ga: hr.ga + aScore, hP: hr.hP + 1, hGf: hr.hGf + hScore, hGa: hr.hGa + aScore, pts: [...hr.pts.slice(-9), hp], res: resH, lastTs: evTs };
-      rolling[aId] = { ...ar, played: ar.played + 1, gf: ar.gf + aScore, ga: ar.ga + hScore, aP: ar.aP + 1, aGf: ar.aGf + aScore, aGa: ar.aGa + hScore, pts: [...ar.pts.slice(-9), ap], res: resA, lastTs: evTs };
-      }});
+          const currentLeague = leagueRoll[slug] || { m: 0, hGf: 0, aGf: 0 };
+          leagueRoll[slug] = { m: currentLeague.m + 1, hGf: currentLeague.hGf + hScore, aGf: currentLeague.aGf + aScore };
+          const hp = hScore > aScore ? 3 : hScore === aScore ? 1 : 0;
+          const ap = aScore > hScore ? 3 : aScore === hScore ? 1 : 0;
+          rolling[hId] = { ...hr, played: hr.played + 1, gf: hr.gf + hScore, ga: hr.ga + aScore, hP: hr.hP + 1, hGf: hr.hGf + hScore, hGa: hr.hGa + aScore, pts: [...hr.pts.slice(-9), hp], res: resH, lastTs: evTs };
+          rolling[aId] = { ...ar, played: ar.played + 1, gf: ar.gf + aScore, ga: ar.ga + hScore, aP: ar.aP + 1, aGf: ar.aGf + aScore, aGa: ar.aGa + hScore, pts: [...ar.pts.slice(-9), ap], res: resA, lastTs: evTs };
+        }
+      });
     }
     release(Date.now());
-    if(scanAborted){stEl.textContent="Scansione interrotta: storico e modello precedenti mantenuti.";return;}
-    if(learner.global.n>=300 && learner.through>=v13Model.through) await v13Save(learner);
+    if (scanAborted) { stEl.textContent = "Scansione interrotta: storico e modello precedenti mantenuti."; return; }
+    if (learner.global.n >= 300 && learner.through >= v13Model.through) await v13Save(learner);
     v13Status();
 
     Object.keys(teams).forEach(tid => { teams[tid].elo = Math.round(eloMap[tid] ?? 1500); });
@@ -692,7 +717,7 @@ window.scanSeason = async totalDays => {
 window.resetHistory = async () => {
   if (isScanning) return;
   await clearTeamHist();
-  await idbDel(V13_KEY); v13Model=v13Fresh(); v13Status();
+  await idbDel(V13_KEY); v13Model = v13Fresh(); v13Status();
   document.getElementById("histScanWrap").classList.add("hidden");
   recalcAllPredictions(); renderTeamLeaderboard(); renderSchedule();
 };
