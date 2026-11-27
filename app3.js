@@ -368,8 +368,8 @@ function logoHtml(url) {
 
 function renderMatchRow(m, showLeague = false) {
   const p = m.prediction, cs = confStyle(p.confidence), isCanceled = m.stateType === "canceled";
-  const started = (m.stateType === "in" || m.stateType === "post") && m.hasScore, canEval = started && !m.isExtra;
-  const isStar = !isCanceled && p.bestPick.prob >= 0.65 && p.confidence >= 76;
+  const started = (m.stateType === "in" || m.stateType === "post") && m.hasScore, canEval = m.stateType === "post" && m.hasScore && !m.isExtra && m.predictionVerified;
+  const isStar = m.stateType === "pre" && p.eligible;
   const pickOk = canEval ? isHit(p.bestPick.code, m.hScore, m.aScore) : null;
   const ouOk = canEval ? isHit(p.ouPick.code, m.hScore, m.aScore) : null;
   const sCls = m.stateType === "in" ? "bg-rose-500/15 border-rose-500/40 text-rose-300"
@@ -398,6 +398,7 @@ function renderMatchRow(m, showLeague = false) {
         ${isStar ? '<span class="text-[9px] font-bold text-emerald-400">⭐ TOP</span>' : ''}
         ${m.lowData ? '<span class="text-[9px] text-amber-400/90" title="Pochi dati statistici">⚠️</span>' : ''}
         ${divBadge}
+        ${m.stateType !== "pre" && !m.predictionVerified ? '<span class="text-[9px] text-amber-300">Non verificato</span>' : ""}
         ${xiBadge}
         ${injBadge}
         ${customSlipBadge}
@@ -442,8 +443,8 @@ function renderSchedule() {
     list.forEach(m => {
       if (m.stateType !== "canceled") {
         allFiltered.push(m); vis++;
-        if (m.prediction.confidence >= 75) tops++;
-        if (m.stateType === "post" && m.hasScore && !m.isExtra) {
+        if (m.stateType === "pre" && m.prediction.eligible) tops++;
+        if (m.stateType === "post" && m.hasScore && !m.isExtra && m.predictionVerified) {
           fin++; if (isHit(m.prediction.bestPick.code, m.hScore, m.aScore)) hit++;
         }
       }
@@ -470,12 +471,12 @@ function renderSchedule() {
     html = `<div class="glass rounded-2xl overflow-hidden divide-y divide-slate-800/70">${sorted.map(m => renderMatchRow(m, true)).join("")}</div>`;
   }
 
-  const topList = allFiltered.slice().sort((a, b) => b.prediction.rankScore - a.prediction.rankScore).slice(0, 6);
+  const topList = allFiltered.filter(m => m.stateType === "pre" && m.prediction.eligible && m.startTs > Date.now()).sort((a, b) => b.prediction.rankScore - a.prediction.rankScore).slice(0, 6);
   if (topList.length) {
     topBox.classList.remove("hidden");
     topBox.innerHTML = `
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <span class="text-xs font-extrabold text-emerald-300 tracking-wide">🔥 PROBABILITÀ PIÙ ALTE (${st.tab.toUpperCase()})</span>
+        <span class="text-xs font-extrabold text-emerald-300 tracking-wide">🔥 SELEZIONI SOPRA SOGLIA (${st.tab.toUpperCase()})</span>
         <button id="loadTop6SlipBtn" class="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-[10px] font-bold text-emerald-300">🎟️ Carica Top 6 in Schedina</button>
       </div>
       <div class="space-y-1.5">
@@ -490,15 +491,16 @@ function renderSchedule() {
             </div>
             <div class="flex items-center gap-1.5 shrink-0">
               <span class="px-2 py-1 rounded-lg text-[11px] font-extrabold bg-emerald-500 text-slate-950">${esc(p.bestPick.code)} • ${probPct}% (@${fairOdd(p.bestPick.prob)})${hitM}</span>
-              <span class="text-[10px] font-bold text-emerald-300 w-9 text-right">Att.${p.confidence}%</span>
+              <span class="text-[10px] font-bold text-emerald-300 w-9 text-right">Q.${p.confidence}%</span>
             </div>
           </div>`;
         }).join("")}
       </div>`;
     document.getElementById("loadTop6SlipBtn").onclick = () => {
-      const playableTop = allFiltered.filter(m => m.stateType === "pre" || m.stateType === "in")
+      const playableTop = allFiltered.filter(m => m.stateType === "pre" && m.prediction.eligible && m.startTs > Date.now())
         .sort((a, b) => b.prediction.rankScore - a.prediction.rankScore).slice(0, 6);
-      const chosen = playableTop.length ? playableTop : topList;
+      const chosen = playableTop;
+      if (!chosen.length) return;
       SLIP.clear();
       chosen.forEach(m => {
         const code = m.prediction.bestPick.code;
@@ -651,9 +653,10 @@ function renderModalStructure(m) {
       return;
     }
 
-    const fmtInj = (label, list, pct) => {
-      if (!list.length) return `<div><span class="text-slate-400">${esc(label)} (${pct}%):</span> <span class="text-emerald-400">Nessun assente segnalato</span></div>`;
-      return `<div><div class="text-slate-300 font-semibold">${esc(label)} (${pct}% • ${list.length} ass.):</div>
+    const fmtInj = (label, list, att, def, avg) => {
+      const splitTxt = (att !== undefined && def !== undefined) ? `Att ${Math.round(att * 100)}% / Dif ${Math.round(def * 100)}%` : `${avg}%`;
+      if (!list.length) return `<div><span class="text-slate-400">${esc(label)} (${splitTxt}):</span> <span class="text-emerald-400">Nessun assente segnalato</span></div>`;
+      return `<div><div class="text-slate-300 font-semibold">${esc(label)} (${splitTxt} • ${list.length} ass.):</div>
         <div class="text-[10px] text-amber-200/90">${list.slice(0, 6).map(x => `${esc(x.name)} (${esc(x.reason || x.type)})`).join(" • ")}${list.length > 6 ? " ..." : ""}</div></div>`;
     };
     const hLu = m.af.lineups.find(x => x.isHome), aLu = m.af.lineups.find(x => !x.isHome);
@@ -679,8 +682,8 @@ function renderModalStructure(m) {
         <button id="btnRefreshSingleAF" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-sky-300">↻ Aggiorna</button>
       </div>
       <div class="space-y-1 text-[11px]">
-        ${fmtInj(m.home, m.af.injH, Math.round(m.af.autoHL * 100))}
-        ${fmtInj(m.away, m.af.injA, Math.round(m.af.autoAL * 100))}
+        ${fmtInj(m.home, m.af.injH, m.af.autoHAtt, m.af.autoHDef, Math.round(m.af.autoHL * 100))}
+        ${fmtInj(m.away, m.af.injA, m.af.autoAAtt, m.af.autoADef, Math.round(m.af.autoAL * 100))}
       </div>
       ${luHtml}
       ${statsHtml}`;
@@ -734,7 +737,7 @@ function renderModalStructure(m) {
     const odd = Number(bookInput.value) || Number(fairOdd(activePick.prob));
     const stake = Math.max(0.1, Number(stakeInput.value) || 1);
     let status = "pending";
-    if (m.stateType === "post" && m.hasScore && !m.isExtra) {
+    if (m.stateType === "post" && m.hasScore && !m.isExtra && m.predictionVerified) {
       status = isHit(activePick.code, m.hScore, m.aScore) ? "won" : "lost";
     }
     BET_LOG.push({
@@ -765,13 +768,13 @@ function buildPickMap(p) {
 }
 
 function updateModalDynamic(m, ov = {}, selectedCode = null) {
-  const p = calcPred(m, ov), cs = confStyle(p.confidence);
+  const p = m.stateType === "pre" ? calcPred(m, ov) : m.prediction, cs = confStyle(p.confidence);
   const overPct = Math.round(p.probs.pO * 100), underPct = 100 - overPct;
-  const started = (m.stateType === "in" || m.stateType === "post") && m.hasScore, canEval = started && !m.isExtra;
+  const started = (m.stateType === "in" || m.stateType === "post") && m.hasScore, canEval = m.stateType === "post" && m.hasScore && !m.isExtra && m.predictionVerified;
   const pickOk = canEval ? isHit(p.bestPick.code, m.hScore, m.aScore) : null;
   const th = getTeamHist(), hHist = th[m.homeId], aHist = th[m.awayId];
   const h2h = (hHist?.m || []).filter(x => (x.oid && m.awayId && x.oid === m.awayId) || (!x.oid && x.t.toLowerCase().includes(m.away.toLowerCase()))).slice(-6).reverse();
-  const evalBadge = m.isExtra ? `<span class="text-xs font-bold text-amber-300">⏱️ Escluso (90' non disp.)</span>` : `<span class="text-xs font-bold">${pickOk ? '✅ Preso' : '❌ Errato'}</span>`;
+  const evalBadge = !canEval && !m.isExtra ? `<span class="text-xs text-amber-300">${m.stateType === "in" ? "In corso" : "Nessuno snapshot pre-partita"}</span>` : m.isExtra ? `<span class="text-xs font-bold text-amber-300">⏱️ Escluso (90' non disp.)</span>` : `<span class="text-xs font-bold">${pickOk ? '✅ Preso' : '❌ Errato'}</span>`;
   const sel = selectedCode || p.bestPick.code;
 
   const pillBtn = (k, v) => {
@@ -806,18 +809,18 @@ function updateModalDynamic(m, ov = {}, selectedCode = null) {
   }
 
   document.getElementById("modalDynamic").innerHTML = `
-    ${started ? `<div class="p-3 rounded-xl bg-slate-950 border ${m.isExtra ? 'border-amber-500/40' : (pickOk ? 'border-emerald-500/40' : 'border-rose-500/40')} flex justify-between items-center gap-2">
+    ${started ? `<div class="p-3 rounded-xl bg-slate-950 border ${!canEval ? 'border-amber-500/40' : (pickOk ? 'border-emerald-500/40' : 'border-rose-500/40')} flex justify-between items-center gap-2">
       <div><div class="text-[10px] text-slate-400">Risultato (${esc(m.statusTxt)}${m.isExtra ? " • mercati validi sui 90'" : ""})</div><div class="text-base font-extrabold text-white">${esc(m.home)} ${esc(m.scoreStr)} ${esc(m.away)}</div></div>
       ${evalBadge}
     </div>` : ""}
     <div class="grid grid-cols-2 gap-2.5">
       <div class="p-3 rounded-xl bg-slate-950 border border-slate-800">
-        <div class="text-[11px] text-slate-400">Pronostico Top</div>
+        <div class="text-[11px] text-slate-400">Pronostico Top${p.calibrated ? ' <span class="text-[9px] text-emerald-400">• Calibrato</span>' : ''}</div>
         <div class="text-xl font-extrabold text-cyan-400">${esc(p.bestPick.code)} <span class="text-sm text-cyan-200">@${fairOdd(p.bestPick.prob)}</span></div>
         <div class="text-[11px] text-slate-300">${esc(p.bestPick.label)} (${(p.bestPick.prob * 100).toFixed(0)}%)</div>
       </div>
       <div class="p-3 rounded-xl border ${cs.bg} ${cs.border}">
-        <div class="text-[11px] text-slate-300">Attendibilità</div>
+        <div class="text-[11px] text-slate-300">Qualità dati (indice)</div>
         <div class="text-xl font-extrabold ${cs.text}">${p.confidence}%</div>
         <div class="text-[11px] text-slate-300">Gol attesi: ${p.lamH} - ${p.lamA}</div>
       </div>
