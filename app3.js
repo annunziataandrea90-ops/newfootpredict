@@ -173,7 +173,7 @@ function openSlipModal() {
 
     document.getElementById("slipTopStats").innerHTML = `
       <div>
-        <div class="text-[11px] text-slate-400">Prob. presa sistema (≥ ${k}/${curItems.length})</div>
+        <div class="text-[11px] text-slate-400">Prob. stimata (indipendenza) (≥ ${k}/${curItems.length})</div>
         <div class="text-xl font-extrabold text-emerald-400">${(sysHitProb * 100).toFixed(1)}%</div>
         ${k < curItems.length ? `<div class="text-[10px] text-slate-400">Tutti presi: ${(combP * 100).toFixed(1)}%</div>` : ""}
       </div>
@@ -194,9 +194,9 @@ function openSlipModal() {
       const min1 = Math.min(...payouts1), max1 = Math.max(...payouts1);
       const colsAfter1Miss = nCk(curItems.length - 1, k);
       const breakEvenOdd = Math.pow(colCount / Math.max(1, colsAfter1Miss), 1 / k);
-      const warn = avgOdd < breakEvenOdd
-        ? `<div class="p-2 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px]">⚠️ Quota media (@${avgOdd.toFixed(2)}) sotto la soglia di pareggio (@${breakEvenOdd.toFixed(2)}) per 1 errore: valuta di scendere a <strong>${Math.max(2, k - 1)} su ${curItems.length}</strong>.</div>`
-        : `<div class="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-[10px]">✅ Quota media (@${avgOdd.toFixed(2)}) sopra la soglia (@${breakEvenOdd.toFixed(2)}): anche con 1 errore vai in attivo!</div>`;
+      const warn = min1 < budget
+        ? `<div class="p-2 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px]">⚠️ Quota media (@${avgOdd.toFixed(2)}) sotto la soglia di pareggio (@${breakEvenOdd.toFixed(2)}) per 1 errore: il ritorno minimo può essere inferiore alla puntata.</div>`
+        : `<div class="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-[10px]">✅ Quota media (@${avgOdd.toFixed(2)}) sopra la soglia (@${breakEvenOdd.toFixed(2)}): ritorno minimo stimato non inferiore alla puntata.</div>`;
       err1Block = `
         <div class="p-2 rounded-lg bg-slate-900/90 border border-slate-800 flex justify-between items-center">
           <span class="text-slate-300">Con <strong>1 errore</strong> (${curItems.length - 1}/${curItems.length}):</span>
@@ -653,10 +653,9 @@ function renderModalStructure(m) {
       return;
     }
 
-    const fmtInj = (label, list, att, def, avg) => {
-      const splitTxt = (att !== undefined && def !== undefined) ? `Att ${Math.round(att * 100)}% / Dif ${Math.round(def * 100)}%` : `${avg}%`;
-      if (!list.length) return `<div><span class="text-slate-400">${esc(label)} (${splitTxt}):</span> <span class="text-emerald-400">Nessun assente segnalato</span></div>`;
-      return `<div><div class="text-slate-300 font-semibold">${esc(label)} (${splitTxt} • ${list.length} ass.):</div>
+    const fmtInj = (label, list, pct) => {
+      if (!list.length) return `<div><span class="text-slate-400">${esc(label)} (${pct}%):</span> <span class="text-emerald-400">Nessun assente segnalato</span></div>`;
+      return `<div><div class="text-slate-300 font-semibold">${esc(label)} (${pct}% • ${list.length} ass.):</div>
         <div class="text-[10px] text-amber-200/90">${list.slice(0, 6).map(x => `${esc(x.name)} (${esc(x.reason || x.type)})`).join(" • ")}${list.length > 6 ? " ..." : ""}</div></div>`;
     };
     const hLu = m.af.lineups.find(x => x.isHome), aLu = m.af.lineups.find(x => !x.isHome);
@@ -682,8 +681,8 @@ function renderModalStructure(m) {
         <button id="btnRefreshSingleAF" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-sky-300">↻ Aggiorna</button>
       </div>
       <div class="space-y-1 text-[11px]">
-        ${fmtInj(m.home, m.af.injH, m.af.autoHAtt, m.af.autoHDef, Math.round(m.af.autoHL * 100))}
-        ${fmtInj(m.away, m.af.injA, m.af.autoAAtt, m.af.autoADef, Math.round(m.af.autoAL * 100))}
+        ${fmtInj(m.home, m.af.injH, Math.round(m.af.autoHL * 100))}
+        ${fmtInj(m.away, m.af.injA, Math.round(m.af.autoAL * 100))}
       </div>
       ${luHtml}
       ${statsHtml}`;
@@ -768,7 +767,7 @@ function buildPickMap(p) {
 }
 
 function updateModalDynamic(m, ov = {}, selectedCode = null) {
-  const p = m.stateType === "pre" ? calcPred(m, ov) : m.prediction, cs = confStyle(p.confidence);
+  const p = m.stateType === "pre" && m.startTs > Date.now() ? calcPred(m, ov) : m.prediction, cs = confStyle(p.confidence);
   const overPct = Math.round(p.probs.pO * 100), underPct = 100 - overPct;
   const started = (m.stateType === "in" || m.stateType === "post") && m.hasScore, canEval = m.stateType === "post" && m.hasScore && !m.isExtra && m.predictionVerified;
   const pickOk = canEval ? isHit(p.bestPick.code, m.hScore, m.aScore) : null;
@@ -815,7 +814,7 @@ function updateModalDynamic(m, ov = {}, selectedCode = null) {
     </div>` : ""}
     <div class="grid grid-cols-2 gap-2.5">
       <div class="p-3 rounded-xl bg-slate-950 border border-slate-800">
-        <div class="text-[11px] text-slate-400">Pronostico Top${p.calibrated ? ' <span class="text-[9px] text-emerald-400">• Calibrato</span>' : ''}</div>
+        <div class="text-[11px] text-slate-400">Pronostico Top · ${p.mlActive ? "ML ibrido" : "Statistico"}</div>
         <div class="text-xl font-extrabold text-cyan-400">${esc(p.bestPick.code)} <span class="text-sm text-cyan-200">@${fairOdd(p.bestPick.prob)}</span></div>
         <div class="text-[11px] text-slate-300">${esc(p.bestPick.label)} (${(p.bestPick.prob * 100).toFixed(0)}%)</div>
       </div>
