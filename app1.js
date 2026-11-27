@@ -565,6 +565,10 @@ const AFProvider = {
   getQuota() {
     try { return JSON.parse(localStorage.getItem(AF_QUOTA_KEY) || "null"); } catch { return null; }
   },
+  isPaidPlan() {
+    const q = this.getQuota();
+    return Number(q?.limit) > 100;
+  },
   saveQuota(headers) {
     try {
       const rem = headers?.get?.("x-ratelimit-requests-remaining");
@@ -639,59 +643,7 @@ const AFProvider = {
   },
   async fetchDetailsBatch(fixtureIds, apiKey) {
     if (!fixtureIds.length) return {};
-    const idsParam = fixtureIds.slice(0, 20).join("-");
-    const fixturesResp = await this.apiGet(fixtureIds.length === 1 ? `fixtures?id=${idsParam}` : `fixtures?ids=${idsParam}`, apiKey);
-    let injuriesResp = [];
-    try {
-      injuriesResp = await this.apiGet(fixtureIds.length === 1 ? `injuries?fixture=${idsParam}` : `injuries?ids=${idsParam}`, apiKey);
-    } catch {}
-
     const byFix = {};
-    fixturesResp.forEach(fx => {
-      const fid = fx.fixture?.id;
-      if (!fid) return;
-      const hId = fx.teams?.home?.id, aId = fx.teams?.away?.id;
-      const lineups = (fx.lineups || []).map(lu => ({
-        teamId: lu.team?.id,
-        isHome: lu.team?.id === hId,
-        formation: lu.formation || "",
-        coach: lu.coach?.name || "",
-        startXI: (lu.startXI || []).map(s => `${s.player?.name || ""}${s.player?.pos ? ` (${s.player.pos})` : ""}`)
-      }));
-      const parseStats = teamId => {
-        const stObj = (fx.statistics || []).find(s => s.team?.id === teamId);
-        if (!stObj) return null;
-        const map = {};
-        (stObj.statistics || []).forEach(row => { map[row.type] = row.value; });
-        return {
-          xg: map["expected_goals"] ?? null,
-          sog: map["Shots on Goal"] ?? null,
-          tot: map["Total Shots"] ?? null,
-          box: map["Shots insidebox"] ?? null,
-          pos: map["Ball Possession"] ?? null
-        };
-      };
-      byFix[fid] = {
-        ts: Date.now(), fid, hId, aId,
-        lineups,
-        statsH: parseStats(hId), statsA: parseStats(aId),
-        injH: [], injA: []
-      };
-    });
-
-    injuriesResp.forEach(inj => {
-      const fid = inj.fixture?.id;
-      const entry = byFix[fid];
-      if (!entry) return;
-      const rec = {
-        name: inj.player?.name || "Giocatore",
-        type: inj.player?.type || "Missing Fixture",
-        reason: inj.player?.reason || ""
-      };
-      if (inj.team?.id === entry.hId) entry.injH.push(rec);
-      else if (inj.team?.id === entry.aId) entry.injA.push(rec);
-    });
-
     const calcAvail = list => {
       let miss = 0, quest = 0;
       const seen = new Set();
@@ -704,13 +656,79 @@ const AFProvider = {
       return Number(clamp(1 - Math.min(miss, 5) * 0.025 - Math.min(quest, 4) * 0.01, 0.84, 1.0).toFixed(3));
     };
 
-    const matchCache = this.loadMatchCache();
-    Object.values(byFix).forEach(item => {
-      item.autoHL = calcAvail(item.injH);
-      item.autoAL = calcAvail(item.injA);
-      matchCache[String(item.fid)] = item;
-    });
-    this.saveMatchCache(matchCache);
+    const parseChunk = (fixturesResp, injuriesResp) => {
+      const chunk = {};
+      fixturesResp.forEach(fx => {
+        const fid = fx.fixture?.id;
+        if (!fid) return;
+        const hId = fx.teams?.home?.id, aId = fx.teams?.away?.id;
+        const lineups = (fx.lineups || []).map(lu => ({
+          teamId: lu.team?.id,
+          isHome: lu.team?.id === hId,
+          formation: lu.formation || "",
+          coach: lu.coach?.name || "",
+          startXI: (lu.startXI || []).map(s => `${s.player?.name || ""}${s.player?.pos ? ` (${s.player.pos})` : ""}`)
+        }));
+        const parseStats = teamId => {
+          const stObj = (fx.statistics || []).find(s => s.team?.id === teamId);
+          if (!stObj) return null;
+          const map = {};
+          (stObj.statistics || []).forEach(row => { map[row.type] = row.value; });
+          return {
+            xg: map["expected_goals"] ?? null,
+            sog: map["Shots on Goal"] ?? null,
+            tot: map["Total Shots"] ?? null,
+            box: map["Shots insidebox"] ?? null,
+            pos: map["Ball Possession"] ?? null
+          };
+        };
+        chunk[fid] = {
+          ts: Date.now(), fid, hId, aId, lineups,
+          statsH: parseStats(hId), statsA: parseStats(aId),
+          injH: [], injA: []
+        };
+      });
+
+      injuriesResp.forEach(inj => {
+        const fid = inj.fixture?.id;
+        const entry = chunk[fid];
+        if (!entry) return;
+        const rec = {
+          name: inj.player?.name || "Giocatore",
+          type: inj.player?.type || "Missing Fixture",
+          reason: inj.player?.reason || ""
+        };
+        if (inj.team?.id === entry.hId) entry.injH.push(rec);
+        else if (inj.team?.id === entry.aId) entry.injA.push(rec);
+      });
+
+      const matchCache = this.loadMatchCache();
+      Object.values(chunk).forEach(item => {
+        item.autoHL = calcAvail(item.injH);
+        item.autoAL = calcAvail(item.injA);
+        matchCache[String(item.fid)] = item;
+        byFix[item.fid] = item;
+      });
+      this.saveMatchCache(matchCache);
+    };
+
+    if (fixtureIds.length > 1 && this.isPaidPlan()) {
+      const idsParam = fixtureIds.slice(0, 20).join("-");
+      const fixturesResp = await this.apiGet(`fixtures?ids=${idsParam}`, apiKey);
+      let injuriesResp = [];
+      try { injuriesResp = await this.apiGet(`injuries?ids=${idsParam}`, apiKey); } catch {}
+      parseChunk(fixturesResp, injuriesResp);
+      return byFix;
+    }
+
+    for (let i = 0; i < fixtureIds.length; i++) {
+      const fid = fixtureIds[i];
+      const fixturesResp = await this.apiGet(`fixtures?id=${fid}`, apiKey);
+      let injuriesResp = [];
+      try { injuriesResp = await this.apiGet(`injuries?fixture=${fid}`, apiKey); } catch {}
+      parseChunk(fixturesResp, injuriesResp);
+      if (i < fixtureIds.length - 1) await sleep(250);
+    }
     return byFix;
   }
 };
