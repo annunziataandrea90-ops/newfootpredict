@@ -8,6 +8,14 @@ const ODDS_CACHE_KEY = "fp_odds_cache_v1";
 const ODDS_SPORTS_KEY = "fp_odds_sports_v1";
 const ODDS_QUOTA_KEY = "fp_odds_quota_v1";
 const ODDS_TTL = 45 * 60 * 1000;
+
+const AF_KEY_STORAGE = "fp_af_api_key_v1";
+const AF_DATE_CACHE_KEY = "fp_af_dates_v1";
+const AF_MATCH_CACHE_KEY = "fp_af_matches_v1";
+const AF_QUOTA_KEY = "fp_af_quota_v1";
+const AF_DATE_TTL = 12 * 3600 * 1000;
+const AF_MATCH_TTL = 20 * 60 * 1000;
+
 const STANDINGS_TTL = 30 * 60 * 1000;
 const EXTRA_RE = /\b(AET|ET|PEN|PENS|PSO|FT-PENS)\b/;
 
@@ -543,6 +551,208 @@ function attachOddsToLeagues(leagues) {
   return matched;
 }
 
+const AFProvider = {
+  getKey() {
+    try { return (localStorage.getItem(AF_KEY_STORAGE) || "").trim(); } catch { return ""; }
+  },
+  setKey(k) {
+    try {
+      const clean = String(k || "").trim();
+      if (clean) localStorage.setItem(AF_KEY_STORAGE, clean);
+      else localStorage.removeItem(AF_KEY_STORAGE);
+    } catch {}
+  },
+  getQuota() {
+    try { return JSON.parse(localStorage.getItem(AF_QUOTA_KEY) || "null"); } catch { return null; }
+  },
+  saveQuota(headers) {
+    try {
+      const rem = headers?.get?.("x-ratelimit-requests-remaining");
+      const lim = headers?.get?.("x-ratelimit-requests-limit");
+      if (rem !== null || lim !== null) {
+        localStorage.setItem(AF_QUOTA_KEY, JSON.stringify({ remaining: rem, limit: lim, ts: Date.now() }));
+      }
+    } catch {}
+  },
+  loadDateCache() {
+    try { return JSON.parse(localStorage.getItem(AF_DATE_CACHE_KEY) || "{}"); } catch { return {}; }
+  },
+  saveDateCache(c) {
+    try { localStorage.setItem(AF_DATE_CACHE_KEY, JSON.stringify(c)); } catch {}
+  },
+  loadMatchCache() {
+    try { return JSON.parse(localStorage.getItem(AF_MATCH_CACHE_KEY) || "{}"); } catch { return {}; }
+  },
+  saveMatchCache(c) {
+    try {
+      const now = Date.now(), clean = {};
+      Object.entries(c).forEach(([k, v]) => {
+        if (v && (now - v.ts) < 6 * 3600 * 1000) clean[k] = v;
+      });
+      localStorage.setItem(AF_MATCH_CACHE_KEY, JSON.stringify(clean));
+    } catch {}
+  },
+  clearCache() {
+    try { localStorage.removeItem(AF_DATE_CACHE_KEY); localStorage.removeItem(AF_MATCH_CACHE_KEY); } catch {}
+  },
+  async apiGet(path, apiKey) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 9000);
+    try {
+      const r = await fetch(`https://v3.football.api-sports.io/${path}`, {
+        method: "GET",
+        headers: { "x-apisports-key": apiKey },
+        signal: ctrl.signal
+      });
+      this.saveQuota(r.headers);
+      if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
+      const data = await r.json();
+      const errs = data?.errors;
+      if (errs && (Array.isArray(errs) ? errs.length : Object.keys(errs).length)) {
+        const msg = Array.isArray(errs) ? errs.join(" • ") : Object.values(errs).join(" • ");
+        throw new Error(msg || "Errore API-Football");
+      }
+      return data?.response || [];
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+  async getFixturesByDate(dateIso, apiKey, force = false) {
+    const cache = this.loadDateCache();
+    const hit = cache[dateIso];
+    if (!force && hit && (Date.now() - hit.ts) < AF_DATE_TTL && Array.isArray(hit.list)) {
+      return { list: hit.list, fromCache: true };
+    }
+    const resp = await this.apiGet(`fixtures?date=${dateIso}`, apiKey);
+    const slim = resp.map(x => ({
+      id: x.fixture?.id,
+      ts: (x.fixture?.timestamp || 0) * 1000,
+      hId: x.teams?.home?.id, hName: x.teams?.home?.name || "",
+      aId: x.teams?.away?.id, aName: x.teams?.away?.name || ""
+    })).filter(x => x.id);
+    const nextCache = {};
+    const now = Date.now();
+    Object.entries(cache).forEach(([k, v]) => { if (v && (now - v.ts) < 48 * 3600 * 1000) nextCache[k] = v; });
+    nextCache[dateIso] = { ts: now, list: slim };
+    this.saveDateCache(nextCache);
+    return { list: slim, fromCache: false };
+  },
+  async fetchDetailsBatch(fixtureIds, apiKey) {
+    if (!fixtureIds.length) return {};
+    const idsParam = fixtureIds.slice(0, 20).join("-");
+    const fixturesResp = await this.apiGet(fixtureIds.length === 1 ? `fixtures?id=${idsParam}` : `fixtures?ids=${idsParam}`, apiKey);
+    let injuriesResp = [];
+    try {
+      injuriesResp = await this.apiGet(fixtureIds.length === 1 ? `injuries?fixture=${idsParam}` : `injuries?ids=${idsParam}`, apiKey);
+    } catch {}
+
+    const byFix = {};
+    fixturesResp.forEach(fx => {
+      const fid = fx.fixture?.id;
+      if (!fid) return;
+      const hId = fx.teams?.home?.id, aId = fx.teams?.away?.id;
+      const lineups = (fx.lineups || []).map(lu => ({
+        teamId: lu.team?.id,
+        isHome: lu.team?.id === hId,
+        formation: lu.formation || "",
+        coach: lu.coach?.name || "",
+        startXI: (lu.startXI || []).map(s => `${s.player?.name || ""}${s.player?.pos ? ` (${s.player.pos})` : ""}`)
+      }));
+      const parseStats = teamId => {
+        const stObj = (fx.statistics || []).find(s => s.team?.id === teamId);
+        if (!stObj) return null;
+        const map = {};
+        (stObj.statistics || []).forEach(row => { map[row.type] = row.value; });
+        return {
+          xg: map["expected_goals"] ?? null,
+          sog: map["Shots on Goal"] ?? null,
+          tot: map["Total Shots"] ?? null,
+          box: map["Shots insidebox"] ?? null,
+          pos: map["Ball Possession"] ?? null
+        };
+      };
+      byFix[fid] = {
+        ts: Date.now(), fid, hId, aId,
+        lineups,
+        statsH: parseStats(hId), statsA: parseStats(aId),
+        injH: [], injA: []
+      };
+    });
+
+    injuriesResp.forEach(inj => {
+      const fid = inj.fixture?.id;
+      const entry = byFix[fid];
+      if (!entry) return;
+      const rec = {
+        name: inj.player?.name || "Giocatore",
+        type: inj.player?.type || "Missing Fixture",
+        reason: inj.player?.reason || ""
+      };
+      if (inj.team?.id === entry.hId) entry.injH.push(rec);
+      else if (inj.team?.id === entry.aId) entry.injA.push(rec);
+    });
+
+    const calcAvail = list => {
+      let miss = 0, quest = 0;
+      const seen = new Set();
+      list.forEach(x => {
+        if (seen.has(x.name)) return;
+        seen.add(x.name);
+        if (String(x.type).toLowerCase().includes("questionable")) quest++;
+        else miss++;
+      });
+      return Number(clamp(1 - Math.min(miss, 5) * 0.025 - Math.min(quest, 4) * 0.01, 0.84, 1.0).toFixed(3));
+    };
+
+    const matchCache = this.loadMatchCache();
+    Object.values(byFix).forEach(item => {
+      item.autoHL = calcAvail(item.injH);
+      item.autoAL = calcAvail(item.injA);
+      matchCache[String(item.fid)] = item;
+    });
+    this.saveMatchCache(matchCache);
+    return byFix;
+  }
+};
+
+function findAFFixtureForMatch(m, afDateList) {
+  if (!Array.isArray(afDateList) || !afDateList.length) return null;
+  let best = null, bestScore = 0;
+  afDateList.forEach(ev => {
+    if (ev.ts && m.startTs && Math.abs(ev.ts - m.startTs) > 95 * 60 * 1000) return;
+    const sh = teamSimScore(m.home, ev.hName), sa = teamSimScore(m.away, ev.aName);
+    if (sh >= 0.5 && sa >= 0.5) {
+      const sc = sh + sa;
+      if (sc > bestScore) { bestScore = sc; best = ev; }
+    }
+  });
+  return best;
+}
+
+function attachAFCacheToLeagues(leagues) {
+  const dateCache = AFProvider.loadDateCache();
+  const matchCache = AFProvider.loadMatchCache();
+  let attached = 0;
+  leagues.forEach(l => {
+    l.matches.forEach(m => {
+      delete m.af;
+      const dateIso = localDateKey(new Date(m.startTs || Date.now()));
+      const dEntry = dateCache[dateIso];
+      if (!dEntry?.list) return;
+      const fx = findAFFixtureForMatch(m, dEntry.list);
+      if (fx) {
+        m.afId = fx.id;
+        const det = matchCache[String(fx.id)];
+        if (det && (Date.now() - det.ts) < 6 * 3600 * 1000) {
+          m.af = det;
+          attached++;
+        }
+      }
+    });
+  });
+  return attached;
+}
+
 const FACT = [1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800];
 const pois = (k, l) => (Math.pow(l, k) * Math.exp(-l)) / FACT[k];
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
@@ -607,7 +817,9 @@ function getTeamAdj(teamId) {
 }
 
 function calcPred(m, ov = {}, useCal = true) {
-  const hL = safeNum(ov.hL ?? m.stats.hL, 1.0), aL = safeNum(ov.aL ?? m.stats.aL, 1.0);
+  const baseHL = m.af ? safeNum(m.af.autoHL, 1.0) : safeNum(m.stats.hL, 1.0);
+  const baseAL = m.af ? safeNum(m.af.autoAL, 1.0) : safeNum(m.stats.aL, 1.0);
+  const hL = safeNum(ov.hL ?? baseHL, 1.0), aL = safeNum(ov.aL ?? baseAL, 1.0);
   const neutralAdj = { attFactor: 1.0, defFactor: 1.0, elo: null };
   const adjH = (useCal && st.autoCal) ? (m.stats.adjH ?? (m.homeId ? getTeamAdj(m.homeId) : neutralAdj)) : neutralAdj;
   const adjA = (useCal && st.autoCal) ? (m.stats.adjA ?? (m.awayId ? getTeamAdj(m.awayId) : neutralAdj)) : neutralAdj;
