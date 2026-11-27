@@ -20,7 +20,7 @@
           ⚽ FootPredict
           <span id="modeBadge" class="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">CARICO...</span>
         </h1>
-        <p id="subStatus" class="text-[11px] text-slate-400">Poisson + ELO 10A + Quote + Formazioni • Value &amp; Diario</p>
+        <p id="subStatus" class="text-[11px] text-slate-400">v13 sperimentale • Poisson + ELO 10A + Quote + Formazioni • Value &amp; Diario</p>
       </div>
       <div class="flex flex-wrap bg-slate-900 p-1 rounded-xl border border-slate-800 gap-0.5">
         <button data-tab="ieri" class="tab-btn px-2 py-1 text-xs font-semibold rounded-lg text-slate-300">Ieri</button>
@@ -72,11 +72,11 @@
               <input id="onlyValueToggle" type="checkbox" class="accent-fuchsia-400" />
               <span>💎 Value</span>
             </label>
-            <label class="flex items-center gap-1 cursor-pointer text-emerald-300 font-semibold" title="Applica ELO storico, correzione attacco/difesa e calibrazione temperatura 10A">
+            <label class="flex items-center gap-1 cursor-pointer text-emerald-300 font-semibold">
               <input id="autoCalToggle" type="checkbox" checked class="accent-emerald-500" />
-              <span>🧠 ELO</span>
+              <span>🧠 ELO + ML</span>
             </label>
-            <label class="flex items-center gap-1 cursor-pointer text-cyan-300 font-semibold" title="Blend con quote mercato (28% Pinnacle/Betfair, 14% media book) tramite IPF coerente">
+            <label class="flex items-center gap-1 cursor-pointer text-cyan-300 font-semibold" title="Peso mercato provvisorio 28%; non appreso dallo storico">
               <input id="marketBlendToggle" type="checkbox" checked class="accent-cyan-400" />
               <span>⚖️ Mercato</span>
             </label>
@@ -105,7 +105,7 @@
         <div class="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 class="text-sm font-bold text-white">📊 Storico 10 Anni, ELO &amp; Calibrazione</h2>
-            <p class="text-[11px] text-slate-400">Backtest cronologico senza leakage • Cache mensile IndexedDB</p>
+            <p class="text-[11px] text-slate-400">Backtest cronologico • ML adattivo con validazione cronologica • Cache mensile IndexedDB</p>
           </div>
           <div class="flex flex-wrap gap-1.5">
             <button id="btnScan1" onclick="scanSeason(365)" class="px-2.5 py-1.5 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 font-bold text-xs disabled:opacity-50">📥 1 Anno</button>
@@ -120,6 +120,8 @@
           </div>
         </div>
 
+        <div id="v13Status" class="text-[11px] text-cyan-300 p-2 border border-slate-700 rounded-lg"></div>
+        <div id="v13LiveStatus" class="text-[11px] text-slate-300 p-2 border border-slate-700 rounded-lg"></div>
         <div id="histScanWrap" class="hidden space-y-1.5">
           <div id="histScanStatus" class="text-[11px] text-cyan-300"></div>
           <div id="histProgressWrap" class="hidden w-full h-1.5 bg-slate-900 rounded-full overflow-hidden">
@@ -142,7 +144,7 @@
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
           <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">Match Verificati</div><div id="hTotal" class="text-sm font-extrabold text-white">0</div></div>
           <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">Esiti Presi</div><div id="hWinRate" class="text-sm font-extrabold text-emerald-400">-</div></div>
-          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400" title="Più basso è meglio (<0.20 ottimo)">Brier Score</div><div id="hBrier" class="text-sm font-extrabold text-cyan-400">-</div></div>
+          <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400" title="Più basso è meglio; confrontare sullo stesso campione">Brier Score</div><div id="hBrier" class="text-sm font-extrabold text-cyan-400">-</div></div>
           <div class="p-2 rounded-xl bg-slate-950 border border-slate-800"><div class="text-[10px] text-slate-400">Over/Under 2.5</div><div id="hOuRate" class="text-sm font-extrabold text-fuchsia-300">-</div></div>
         </div>
 
@@ -179,7 +181,7 @@
     <div class="rounded-2xl bg-slate-900/95 backdrop-blur border border-emerald-500/40 shadow-xl shadow-black/60 px-3 py-2 flex items-center justify-between gap-2">
       <div class="min-w-0">
         <div class="text-xs font-extrabold text-white">🎟️ Schedina (<span id="slipCount">0</span> selezioni)</div>
-        <div class="text-[11px] text-slate-300">Prob. combinata: <strong id="slipProb" class="text-emerald-400">0%</strong> • Quota equa: <strong id="slipOdd" class="text-cyan-300">@1.00</strong></div>
+        <div class="text-[11px] text-slate-300">Prob. combinata (indipendenza): <strong id="slipProb" class="text-emerald-400">0%</strong> • Quota equa: <strong id="slipOdd" class="text-cyan-300">@1.00</strong></div>
       </div>
       <div class="flex items-center gap-1.5 shrink-0">
         <button id="slipOpenBtn" class="px-3 py-1.5 rounded-xl bg-emerald-500 text-slate-950 text-xs font-bold">Sistemi / Vedi</button>
@@ -201,8 +203,9 @@
     </div>
   </div>
 
-  <script src="app1.js?v=8"></script>
-  <script src="app2.js?v=8"></script>
-  <script src="app3.js?v=8"></script>
+<script src="app1.js?v=13"></script>
+  <script src="adaptive.js?v=13"></script>
+  <script src="app2.js?v=13"></script>
+  <script src="app3.js?v=13"></script>
 </body>
 </html>
