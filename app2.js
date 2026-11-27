@@ -5,8 +5,40 @@ let currentLoadToken = 0;
 let currentModalToken = 0;
 const dayOffset = () => st.tab === "ieri" ? -1 : st.tab === "oggi" ? 0 : 1;
 
+const SNAP_KEY = "fp_prematch_snapshots_v8";
+function loadSnapshots() { try { return JSON.parse(localStorage.getItem(SNAP_KEY) || "{}") || {}; } catch { return {}; } }
+let predictionSnapshots = loadSnapshots();
+
+function makeSnapFingerprint(m) {
+  return [
+    m.odds ? 1 : 0,
+    m.af ? 1 : 0,
+    st.autoCal ? 1 : 0,
+    st.useMarketBlend ? 1 : 0,
+    m.prediction?.modelVersion || ""
+  ].join("|");
+}
+
 function recalcAllPredictions() {
-  LEAGUES.forEach(l => l.matches.forEach(m => { m.prediction = calcPred(m); }));
+  const now = Date.now(); let changed = false;
+  LEAGUES.forEach(l => l.matches.forEach(m => {
+    const key = String(m.id) + ":" + String(m.startTs);
+    const snap = predictionSnapshots[key];
+    if (m.stateType === "pre" && Number.isFinite(m.startTs) && now < m.startTs) {
+      m.prediction = calcPred(m);
+      m.predictionVerified = true;
+      const fp = makeSnapFingerprint(m);
+      // Aggiorna lo snapshot finché il match è pre-partita se arrivano quote/formazioni o cambia la configurazione
+      if (!snap || snap.fp !== fp) {
+        predictionSnapshots[key] = { capturedAt: now, startTs: m.startTs, fp, prediction: m.prediction };
+        changed = true;
+      }
+    } else {
+      m.predictionVerified = Boolean(snap && snap.capturedAt < m.startTs);
+      m.prediction = m.predictionVerified ? snap.prediction : calcPred(m);
+    }
+  }));
+  if (changed) { try { localStorage.setItem(SNAP_KEY, JSON.stringify(predictionSnapshots)); } catch (e) { console.warn("Snapshot non salvato", e); } }
 }
 
 function updateApiStatusBars(customOdds = null, customAf = null) {
@@ -338,7 +370,7 @@ async function loadDay(offset, force = false) {
           scoreStr: ((stateType === "in" || stateType === "post") && hasScore) ? `${hScore} - ${aScore}` : "- : -",
           statusTxt, homeId: hId, awayId: aId,
           home: home.team?.displayName || "Casa", away: away.team?.displayName || "Ospite",
-          homeLogo: home.team?.logo || "", awayLogo: away.team?.logo || "", lowData: !ok,
+          homeLogo: home.team?.logo || "", awayLogo: home.team?.logo || "", lowData: !ok,
           formH: hf.pills, formA: af.pills,
           statSourceH: hs ? `${hs.source} (${hs.played}g)` : "Default",
           statSourceA: as ? `${as.source} (${as.played}g)` : "Default",
@@ -417,6 +449,7 @@ function parseMonthEvents(events, slug, compName, kind, flag, targetMap) {
       if (Number.isFinite(ts)) {
         targetMap.set(ev.id, {
           id: ev.id, ts, date: ev.date, slug, compName, kind, flag,
+          neutralSite: Boolean(comp.neutralSite),
           hId: home.team.id, hName: home.team.displayName || "Casa", hScore: Number(home.score),
           aId: away.team.id, aName: away.team.displayName || "Ospite", aScore: Number(away.score)
         });
@@ -517,11 +550,18 @@ window.scanSeason = async totalDays => {
     }
 
     const allEvents = Array.from(evMap.values()).sort((a, b) => a.ts - b.ts);
-    stEl.textContent = `Analizzo ${allEvents.length.toLocaleString("it-IT")} match + calcolo rating ELO storico...`;
+    stEl.textContent = `Analizzo ${allEvents.length.toLocaleString("it-IT")} match (EWMA + ELO + Calibrazione)...`;
     await sleep(20);
 
-    const rolling = {}, leagueRoll = {}, eloMap = {}, teams = {};
-    const initRoll = () => ({ played: 0, gf: 0, ga: 0, hP: 0, hGf: 0, hGa: 0, aP: 0, aGf: 0, aGa: 0, pts: [], res: [], lastTs: 0 });
+    // EWMA normalizzato per lega con decadimento per partita (half-life ~10 match) e peso ridotto su coppe/amichevoli
+    const rolling = {}, leagueRoll = {}, eloMap = {}, domLeagueMap = {}, teams = {};
+    const calSamples = [];
+    const initRoll = () => ({
+      played: 0, wSum: 0, wAtt: 0, wDef: 0,
+      hwSum: 0, hwAtt: 0, hwDef: 0,
+      awSum: 0, awAtt: 0, awDef: 0,
+      pts: [], res: [], lastTs: 0
+    });
     const getRoll = id => rolling[id] || initRoll();
     const getElo = (id, slug) => eloMap[id] ?? (LEAGUE_TIER[slug]?.elo ?? 1470);
     const formFactor = arr => !arr.length ? 1.0 : 0.88 + (arr.slice(-5).reduce((a, b) => a + b, 0) / (Math.min(5, arr.length) * 3)) * 0.24;
@@ -531,24 +571,34 @@ window.scanSeason = async totalDays => {
       let rGf = 0, rGa = 0, rEgf = 0, rEga = 0;
       sl.forEach(x => { rGf += x.gf; rGa += x.ga; rEgf += x.egf; rEga += x.ega; });
       return {
-        attFactor: clamp((rGf + 4.0) / Math.max(1.0, rEgf + 4.0), 0.90, 1.10),
-        defFactor: clamp((rGa + 4.0) / Math.max(1.0, rEga + 4.0), 0.90, 1.10)
+        attFactor: clamp((rGf + 4.5) / Math.max(1.0, rEgf + 4.5), 0.92, 1.08),
+        defFactor: clamp((rGa + 4.5) / Math.max(1.0, rEga + 4.5), 0.92, 1.08)
       };
     };
     const decayRoll = r => ({
-      played: r.played * 0.35, gf: r.gf * 0.35, ga: r.ga * 0.35,
-      hP: r.hP * 0.35, hGf: r.hGf * 0.35, hGa: r.hGa * 0.35,
-      aP: r.aP * 0.35, aGf: r.aGf * 0.35, aGa: r.aGa * 0.35,
+      played: r.played * 0.35,
+      wSum: r.wSum * 0.35, wAtt: r.wAtt * 0.35, wDef: r.wDef * 0.35,
+      hwSum: r.hwSum * 0.35, hwAtt: r.hwAtt * 0.35, hwDef: r.hwDef * 0.35,
+      awSum: r.awSum * 0.35, awAtt: r.awAtt * 0.35, awDef: r.awDef * 0.35,
       pts: r.pts.slice(-2), res: [], lastTs: r.lastTs
     });
 
+    const EWMA_DECAY = 0.93;
+
     allEvents.forEach(rec => {
-      const { hId, aId, hName, aName, hScore, aScore, ts: evTs, date, slug, compName, kind, flag } = rec;
+      const { hId, aId, hName, aName, hScore, aScore, ts: evTs, date, slug, compName, kind, flag, neutralSite } = rec;
       if (!Number.isFinite(hScore) || !Number.isFinite(aScore)) return;
+
+      if (kind === "Campionato") {
+        domLeagueMap[hId] = slug;
+        domLeagueMap[aId] = slug;
+      }
 
       const lr = leagueRoll[slug] || { m: 0, hGf: 0, aGf: 0 };
       const avgH = Number(clamp((lr.hGf + 1.48 * 10) / (lr.m + 10), 0.90, 2.30).toFixed(3));
       const avgA = Number(clamp((lr.aGf + 1.18 * 10) / (lr.m + 10), 0.70, 2.00).toFixed(3));
+      const effAvgH = neutralSite ? Number(((avgH + avgA) / 2).toFixed(3)) : avgH;
+      const effAvgA = neutralSite ? effAvgH : avgA;
 
       let hr = getRoll(hId), ar = getRoll(aId);
       const tierBase = LEAGUE_TIER[slug]?.elo ?? 1470;
@@ -561,33 +611,46 @@ window.scanSeason = async totalDays => {
         if (eloMap[aId] !== undefined) eloMap[aId] = eloMap[aId] * 0.78 + tierBase * 0.22;
       }
 
-      const eloH = getElo(hId, slug), eloA = getElo(aId, slug);
+      const eloH = getElo(hId, domLeagueMap[hId] || slug);
+      const eloA = getElo(aId, domLeagueMap[aId] || slug);
       let resH = hr.res, resA = ar.res;
 
-      if (hr.played >= 2 && ar.played >= 2) {
-        const rawHGF = hr.hP >= 3 ? (hr.hGf / hr.hP) : (hr.gf / hr.played) * 1.08;
-        const rawHGA = hr.hP >= 3 ? (hr.hGa / hr.hP) : (hr.ga / hr.played) * 0.92;
-        const rawAGF = ar.aP >= 3 ? (ar.aGf / ar.aP) : (ar.gf / ar.played) * 0.92;
-        const rawAGA = ar.aP >= 3 ? (ar.aGa / ar.aP) : (ar.ga / ar.played) * 1.08;
+      if (hr.wSum >= 2.0 && ar.wSum >= 2.0) {
+        const useSplitH = !neutralSite && hr.hwSum >= 2.5;
+        const useSplitA = !neutralSite && ar.awSum >= 2.5;
+        const attIdxH = useSplitH ? (hr.hwAtt / hr.hwSum) : (hr.wAtt / hr.wSum);
+        const defIdxH = useSplitH ? (hr.hwDef / hr.hwSum) : (hr.wDef / hr.wSum);
+        const attIdxA = useSplitA ? (ar.awAtt / ar.awSum) : (ar.wAtt / ar.wSum);
+        const defIdxA = useSplitA ? (ar.awDef / ar.awSum) : (ar.wDef / ar.wSum);
+
+        const hGF = shrink(clamp(attIdxH, 0.30, 2.8) * effAvgH, useSplitH ? hr.hwSum : hr.wSum, effAvgH, 5);
+        const hGA = shrink(clamp(defIdxH, 0.30, 2.8) * effAvgA, useSplitH ? hr.hwSum : hr.wSum, effAvgA, 5);
+        const aGF = shrink(clamp(attIdxA, 0.30, 2.8) * effAvgA, useSplitA ? ar.awSum : ar.wSum, effAvgA, 5);
+        const aGA = shrink(clamp(defIdxA, 0.30, 2.8) * effAvgH, useSplitA ? ar.awSum : ar.wSum, effAvgH, 5);
 
         const fake = {
           home: hName, away: aName, slug,
           stats: {
-            avgH, avgA,
-            hGF: shrink(rawHGF, hr.hP >= 3 ? hr.hP : hr.played, avgH, 5),
-            hGA: shrink(rawHGA, hr.hP >= 3 ? hr.hP : hr.played, avgA, 5),
-            aGF: shrink(rawAGF, ar.aP >= 3 ? ar.aP : ar.played, avgA, 5),
-            aGA: shrink(rawAGA, ar.aP >= 3 ? ar.aP : ar.played, avgH, 5),
+            avgH: effAvgH, avgA: effAvgA,
+            hGF, hGA, aGF, aGA,
             hFF: formFactor(hr.pts), aFF: formFactor(ar.pts), hL: 1.0, aL: 1.0,
             adjH: calcRollAdj(hr), adjA: calcRollAdj(ar),
             isCrossLeague: kind !== "Campionato", eloH, eloA,
-            comp: hr.played >= 5 && ar.played >= 5 ? 0.91 : 0.74, vol: 0.22
+            domSlugH: domLeagueMap[hId] || slug, domSlugA: domLeagueMap[aId] || slug,
+            comp: hr.played >= 5 && ar.played >= 5 ? 0.91 : 0.74, vol: kind === "Campionato" ? 0.20 : 0.26
           }
         };
-        const pred = calcPred(fake, {}, true);
+        // Disattiva calibrazione post-hoc dentro scanSeason per evitare circolarità nel fitting di Temperature Scaling
+        const pred = calcPred(fake, {}, true, false);
         const lH = Number(pred.lamH), lA = Number(pred.lamA);
         resH = [...hr.res.slice(-14), { gf: hScore, ga: aScore, egf: lH, ega: lA }];
         resA = [...ar.res.slice(-14), { gf: aScore, ga: hScore, egf: lA, ega: lH }];
+
+        calSamples.push({
+          p1: pred.rawProbs.p1, px: pred.rawProbs.px, p2: pred.rawProbs.p2, pO: pred.rawProbs.pO,
+          res1X2: hScore > aScore ? 0 : (hScore === aScore ? 1 : 2),
+          resO: (hScore + aScore) >= 3 ? 1 : 0
+        });
 
         const ph = isHit(pred.bestPick.code, hScore, aScore) ? 1 : 0;
         const oh = isHit(pred.ouPick.code, hScore, aScore) ? 1 : 0;
@@ -606,37 +669,70 @@ window.scanSeason = async totalDays => {
           const myGf = isHome ? hScore : aScore, myGa = isHome ? aScore : hScore;
           const myEgf = isHome ? lH : lA, myEga = isHome ? lA : lH;
           t.tot++; t.hit += ph; t.ou += oh;
-          if (pred.confidence >= 75) { t.tTot++; t.tHit += ph; }
+          if (pred.eligible) { t.tTot++; t.tHit += ph; }
           t.eg += lH + lA; t.rg += hScore + aScore;
           t.gf += myGf; t.ga += myGa; t.egf += myEgf; t.ega += myEga;
           t.m.push({
             d: date.slice(0, 10), c: compName, k: kind, f: flag, oid: oppId, h: isHome ? 1 : 0,
             t: isHome ? `${tName} - ${opp}` : `${opp} - ${tName}`, s: `${hScore}-${aScore}`,
             p: pred.bestPick.code, cat, pr, ph, o: pred.ouPick.code, oh,
-            b1x2, bOu, gf: myGf, ga: myGa, egf: myEgf, ega: myEga
+            b1x2, bOu, modelVersion: "8.0", eventId: rec.id, eligible: pred.eligible, gf: myGf, ga: myGa, egf: myEgf, ega: myEga
           });
         };
         pushRec(hId, hName, aId, aName, true);
         pushRec(aId, aName, hId, hName, false);
       }
 
-      const expH = 1 / (1 + Math.pow(10, (eloA - (eloH + 55)) / 400));
+      const homeAdvElo = neutralSite ? 0 : 55;
+      const expH = 1 / (1 + Math.pow(10, (eloA - (eloH + homeAdvElo)) / 400));
       const actH = hScore > aScore ? 1 : hScore === aScore ? 0.5 : 0;
-      const kElo = (kind === "Coppa" ? 26 : 20) * Math.max(1, Math.log(Math.abs(hScore - aScore) + 1) * 1.15);
+      const baseK = slug === "fifa.friendly" ? 10 : (kind === "Nazionali" ? 18 : (kind === "Coppa" ? 18 : 22));
+      const kElo = baseK * Math.max(1, Math.log(Math.abs(hScore - aScore) + 1) * 1.15);
       eloMap[hId] = eloH + kElo * (actH - expH);
       eloMap[aId] = eloA + kElo * ((1 - actH) - (1 - expH));
 
-      leagueRoll[slug] = { m: lr.m + 1, hGf: lr.hGf + hScore, aGf: lr.aGf + aScore };
+      if (!neutralSite) {
+        leagueRoll[slug] = { m: lr.m + 1, hGf: lr.hGf + hScore, aGf: lr.aGf + aScore };
+      }
+
+      const compW = kind === "Campionato" ? 1.0 : (kind === "Coppa" ? 0.65 : 0.55);
       const hp = hScore > aScore ? 3 : hScore === aScore ? 1 : 0;
       const ap = aScore > hScore ? 3 : aScore === hScore ? 1 : 0;
-      rolling[hId] = { ...hr, played: hr.played + 1, gf: hr.gf + hScore, ga: hr.ga + aScore, hP: hr.hP + 1, hGf: hr.hGf + hScore, hGa: hr.hGa + aScore, pts: [...hr.pts, hp], res: resH, lastTs: evTs };
-      rolling[aId] = { ...ar, played: ar.played + 1, gf: ar.gf + aScore, ga: ar.ga + hScore, aP: ar.aP + 1, aGf: ar.aGf + aScore, aGa: ar.aGa + hScore, pts: [...ar.pts, ap], res: resA, lastTs: evTs };
+      const hAttRatio = clamp(hScore / effAvgH, 0, 4.0), hDefRatio = clamp(aScore / effAvgA, 0, 4.0);
+      const aAttRatio = clamp(aScore / effAvgA, 0, 4.0), aDefRatio = clamp(hScore / effAvgH, 0, 4.0);
+
+      rolling[hId] = {
+        played: hr.played + 1,
+        wSum: hr.wSum * EWMA_DECAY + compW,
+        wAtt: hr.wAtt * EWMA_DECAY + compW * hAttRatio,
+        wDef: hr.wDef * EWMA_DECAY + compW * hDefRatio,
+        hwSum: neutralSite ? hr.hwSum : hr.hwSum * EWMA_DECAY + compW,
+        hwAtt: neutralSite ? hr.hwAtt : hr.hwAtt * EWMA_DECAY + compW * hAttRatio,
+        hwDef: neutralSite ? hr.hwDef : hr.hwDef * EWMA_DECAY + compW * hDefRatio,
+        awSum: hr.awSum, awAtt: hr.awAtt, awDef: hr.awDef,
+        pts: [...hr.pts.slice(-9), hp], res: resH, lastTs: evTs
+      };
+      rolling[aId] = {
+        played: ar.played + 1,
+        wSum: ar.wSum * EWMA_DECAY + compW,
+        wAtt: ar.wAtt * EWMA_DECAY + compW * aAttRatio,
+        wDef: ar.wDef * EWMA_DECAY + compW * aDefRatio,
+        hwSum: ar.hwSum, hwAtt: ar.hwAtt, hwDef: ar.hwDef,
+        awSum: neutralSite ? ar.awSum : ar.awSum * EWMA_DECAY + compW,
+        awAtt: neutralSite ? ar.awAtt : ar.awAtt * EWMA_DECAY + compW * aAttRatio,
+        awDef: neutralSite ? ar.awDef : ar.awDef * EWMA_DECAY + compW * aDefRatio,
+        pts: [...ar.pts.slice(-9), ap], res: resA, lastTs: evTs
+      };
     });
 
     Object.keys(teams).forEach(tid => { teams[tid].elo = Math.round(eloMap[tid] ?? 1500); });
+    const calFitted = fitCalibrationParams(calSamples);
     await saveTeamHist(teams);
+    await saveCalParams(calFitted);
+
     pBar.style.width = "100%";
-    stEl.textContent = `${scanAborted ? "⏹️ Parziale:" : "✅ Salvati"} ${allEvents.length.toLocaleString("it-IT")} match + ELO su ${Object.keys(teams).length} squadre!`;
+    const calNote = calFitted ? ` • Temp 1X2=${calFitted.temp1X2} / O/U=${calFitted.tempOU}` : "";
+    stEl.textContent = `${scanAborted ? "⏹️ Parziale:" : "✅ Salvati"} ${allEvents.length.toLocaleString("it-IT")} match + ELO su ${Object.keys(teams).length} squadre${calNote}!`;
     recalcAllPredictions();
     renderTeamLeaderboard();
     renderSchedule();
