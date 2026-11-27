@@ -298,53 +298,57 @@ function openSlipModal() {
   mod.classList.remove("hidden"); mod.classList.add("flex");
 }
 
-function openOddsKeyModal() {
+function openApiKeysModal() {
   currentModalToken++;
-  const curKey = OddsProvider.getKey();
-  const quota = OddsProvider.getQuota();
-  document.getElementById("modalLeague").textContent = "The Odds API • Salvataggio solo su questo dispositivo";
-  document.getElementById("modalTitle").textContent = "🔑 Configura API Key Quote";
+  const curOdds = OddsProvider.getKey(), curAf = AFProvider.getKey();
+  const qOdds = OddsProvider.getQuota(), qAf = AFProvider.getQuota();
+  document.getElementById("modalLeague").textContent = "Chiavi salvate solo in locale su questo dispositivo";
+  document.getElementById("modalTitle").textContent = "🔑 Configura API Keys";
   document.getElementById("modalBody").innerHTML = `
-    <div class="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs text-slate-300">
-      <p>La chiave viene salvata <strong>solo nel localStorage di questo browser</strong> (mai su GitHub).</p>
-      <p class="text-[11px] text-slate-400">Ogni chiamata usa <code>2 crediti</code> per campionato attivo (<code>regions=eu</code>, <code>markets=h2h,totals</code>) e resta in cache 45 minuti.</p>
-      ${quota?.remaining != null ? `<div class="text-[11px] text-emerald-400 font-bold">Ultimo saldo crediti rilevato: ${esc(quota.remaining)} rimasti</div>` : ""}
+    <div class="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-300 space-y-1">
+      <p>Le chiavi restano <strong>solo nel localStorage di questo browser</strong> (mai inviate su GitHub).</p>
     </div>
-    <div class="space-y-2 text-xs">
-      <label class="block text-slate-400 font-semibold">La tua API Key (The Odds API v4):</label>
-      <input id="oddsKeyInput" type="password" value="${esc(curKey)}" placeholder="Incolla qui la tua apiKey..."
-        class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
-      <div class="flex gap-2">
-        <button id="saveOddsKeyBtn" class="flex-1 py-2 rounded-xl bg-emerald-500 text-slate-950 font-bold">💾 Salva Key</button>
-        <button id="clearOddsCacheBtn" class="px-3 py-2 rounded-xl bg-slate-800 text-cyan-300 border border-slate-700 font-semibold">🧹 Cache</button>
-        ${curKey ? `<button id="delOddsKeyBtn" class="px-3 py-2 rounded-xl bg-slate-800 text-rose-300 border border-slate-700 font-semibold">🗑️</button>` : ""}
-      </div>
-      <div id="oddsKeyMsg" class="text-[11px] text-emerald-400"></div>
-    </div>`;
 
-  document.getElementById("saveOddsKeyBtn").onclick = () => {
-    const val = document.getElementById("oddsKeyInput").value.trim();
-    if (!val) { document.getElementById("oddsKeyMsg").textContent = "Inserisci una chiave valida."; return; }
-    OddsProvider.setKey(val);
-    updateOddsStatusBar("✅ API Key salvata! Premi 💰 Scarica Quote per caricare le quote.");
+    <div class="p-3 rounded-xl bg-fuchsia-950/20 border border-fuchsia-500/30 space-y-2 text-xs">
+      <div class="flex justify-between items-center">
+        <span class="font-bold text-fuchsia-300">💰 1. The Odds API (Quote &amp; Value)</span>
+        ${qOdds?.remaining != null ? `<span class="text-[10px] text-emerald-400 font-bold">Rimasti: ${esc(qOdds.remaining)}</span>` : ""}
+      </div>
+      <input id="oddsKeyInput" type="password" value="${esc(curOdds)}" placeholder="Incolla apiKey The Odds API..."
+        class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+      <p class="text-[10px] text-slate-400">Piano gratis: 500 crediti/mese • Premi <strong>💰 Quote</strong> quando vuoi scaricare (2 crediti/torneo).</p>
+    </div>
+
+    <div class="p-3 rounded-xl bg-sky-950/20 border border-sky-500/30 space-y-2 text-xs">
+      <div class="flex justify-between items-center">
+        <span class="font-bold text-sky-300">🔬 2. API-Football (Formazioni, Assenze &amp; xG)</span>
+        ${qAf?.remaining != null ? `<span class="text-[10px] text-emerald-400 font-bold">Oggi: ${esc(qAf.remaining)}/${esc(qAf.limit || 100)}</span>` : ""}
+      </div>
+      <input id="afKeyInput" type="password" value="${esc(curAf)}" placeholder="Incolla x-apisports-key (dashboard.api-football.com)..."
+        class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+      <p class="text-[10px] text-slate-400">Piano gratis: 100 req/giorno • Usa <strong>🔬 Top Match</strong> per analizzare fino a 20 partite filtrate con sole 2–3 richieste!</p>
+    </div>
+
+    <div class="flex gap-2 text-xs">
+      <button id="saveAllKeysBtn" class="flex-1 py-2.5 rounded-xl bg-emerald-500 text-slate-950 font-bold">💾 Salva Chiavi</button>
+      <button id="clearAllCachesBtn" class="px-3 py-2.5 rounded-xl bg-slate-800 text-cyan-300 border border-slate-700 font-semibold">🧹 Svuota Cache</button>
+    </div>
+    <div id="apiKeysMsg" class="text-[11px] text-emerald-400"></div>`;
+
+  document.getElementById("saveAllKeysBtn").onclick = () => {
+    OddsProvider.setKey(document.getElementById("oddsKeyInput").value);
+    AFProvider.setKey(document.getElementById("afKeyInput").value);
+    updateApiStatusBars();
     closeModal();
   };
-  document.getElementById("clearOddsCacheBtn").onclick = () => {
+  document.getElementById("clearAllCachesBtn").onclick = () => {
     OddsProvider.clearCache();
+    AFProvider.clearCache();
     attachOddsToLeagues(LEAGUES);
-    recalcAllPredictions(); renderSchedule(); updateOddsStatusBar("Cache quote svuotata.");
-    document.getElementById("oddsKeyMsg").textContent = "Cache quote svuotata.";
+    attachAFCacheToLeagues(LEAGUES);
+    recalcAllPredictions(); renderSchedule(); updateApiStatusBars("Cache quote svuotata.", "Cache API-Football svuotata.");
+    document.getElementById("apiKeysMsg").textContent = "✅ Cache quote e formazioni svuotate.";
   };
-  const delBtn = document.getElementById("delOddsKeyBtn");
-  if (delBtn) {
-    delBtn.onclick = () => {
-      OddsProvider.setKey("");
-      OddsProvider.clearCache();
-      attachOddsToLeagues(LEAGUES);
-      recalcAllPredictions(); renderSchedule(); updateOddsStatusBar();
-      closeModal();
-    };
-  }
 
   document.body.classList.add("overflow-hidden");
   const mod = document.getElementById("detailModal");
@@ -381,6 +385,10 @@ function renderMatchRow(m, showLeague = false) {
     ? `<span class="px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-400/40 text-[9px] font-extrabold">💎 +${Math.round(p.bestValue.ev * 100)}% (${esc(p.bestValue.code)} @${p.bestValue.odd.toFixed(2)})</span>` : "";
   const divBadge = p.marketDiv >= 0.14
     ? `<span class="text-[9px] text-amber-300 font-bold" title="Forte divergenza rispetto alle quote sharp di mercato">⚠️ Mkt</span>` : "";
+  const xiBadge = m.af?.lineups?.length
+    ? `<span class="text-[9px] text-emerald-300 font-bold" title="Formazioni ufficiali caricate">📋 XI</span>` : "";
+  const injBadge = (m.af && (m.af.injH.length >= 2 || m.af.injA.length >= 2))
+    ? `<span class="text-[9px] text-sky-300 font-bold" title="Assenze segnalate Casa/Ospite">🏥 ${m.af.injH.length}/${m.af.injA.length}</span>` : "";
 
   return `<div data-lid="${esc(m.leagueId)}" data-mid="${esc(m.id)}" class="match-card px-2.5 py-2.5 flex items-center justify-between gap-2 cursor-pointer hover:bg-slate-800/50 active:bg-slate-800 transition-colors ${isStar ? 'bg-emerald-500/5 border-l-2 border-l-emerald-400' : ''} ${isCanceled ? 'opacity-60' : ''}">
     <div class="min-w-0 flex-1">
@@ -390,6 +398,8 @@ function renderMatchRow(m, showLeague = false) {
         ${isStar ? '<span class="text-[9px] font-bold text-emerald-400">⭐ TOP</span>' : ''}
         ${m.lowData ? '<span class="text-[9px] text-amber-400/90" title="Pochi dati statistici">⚠️</span>' : ''}
         ${divBadge}
+        ${xiBadge}
+        ${injBadge}
         ${customSlipBadge}
         ${valBadge}
       </div>
@@ -575,9 +585,12 @@ async function loadModalSummary(m, token) {
 function renderModalStructure(m) {
   let activePick = { code: m.prediction.bestPick.code, prob: m.prediction.bestPick.prob };
   const initRealOdd = m.odds?.best?.[activePick.code]?.odd || "";
+  const defSimH = m.af ? Math.round(m.af.autoHL * 100) : 100;
+  const defSimA = m.af ? Math.round(m.af.autoAL * 100) : 100;
 
   document.getElementById("modalBody").innerHTML = `
     <div id="modalDynamic" class="space-y-3"></div>
+    <div id="modalAFBox" class="p-3 rounded-xl bg-slate-950 border border-sky-500/30 space-y-2"></div>
     <div id="modalSummaryExtra" class="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2"></div>
 
     <div class="p-3 rounded-xl bg-cyan-950/25 border border-cyan-500/30 space-y-2 text-xs">
@@ -602,12 +615,81 @@ function renderModalStructure(m) {
         <span class="font-bold text-emerald-400">Simula Assenze / Turnover</span>
         <button id="simResetBtn" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300">Reset 100%</button>
       </div>
-      <div><div class="flex justify-between"><span>${esc(m.home)}</span><span id="simHLabel">100%</span></div><input id="simH" type="range" min="70" max="100" value="100" class="w-full accent-emerald-500"/></div>
-      <div><div class="flex justify-between"><span>${esc(m.away)}</span><span id="simALabel">100%</span></div><input id="simA" type="range" min="70" max="100" value="100" class="w-full accent-emerald-500"/></div>
+      <div><div class="flex justify-between"><span>${esc(m.home)}</span><span id="simHLabel">${defSimH}%</span></div><input id="simH" type="range" min="70" max="100" value="${defSimH}" class="w-full accent-emerald-500"/></div>
+      <div><div class="flex justify-between"><span>${esc(m.away)}</span><span id="simALabel">${defSimA}%</span></div><input id="simA" type="range" min="70" max="100" value="${defSimA}" class="w-full accent-emerald-500"/></div>
     </div>`;
 
   const simH = document.getElementById("simH"), simA = document.getElementById("simA");
   const bookInput = document.getElementById("bookOddInput"), stakeInput = document.getElementById("betStakeInput");
+
+  const renderAFBox = () => {
+    const afBox = document.getElementById("modalAFBox");
+    if (!afBox) return;
+    if (!m.af) {
+      afBox.innerHTML = `
+        <div class="flex items-center justify-between gap-2 text-xs">
+          <span class="font-bold text-sky-300">🔬 Formazioni, Assenze &amp; xG (API-Football)</span>
+          <button id="btnFetchSingleAF" class="px-2.5 py-1 rounded-lg bg-sky-500 text-slate-950 font-bold text-[11px] disabled:opacity-50">Scarica solo questo match</button>
+        </div>
+        <div id="afSingleMsg" class="text-[10px] text-slate-400">Consuma solo 2–3 richieste sulle 100/giorno (1 sola per mappa giorno + 2 per match).</div>`;
+      document.getElementById("btnFetchSingleAF").onclick = async () => {
+        const b = document.getElementById("btnFetchSingleAF"), msgEl = document.getElementById("afSingleMsg");
+        b.disabled = true; msgEl.textContent = "Scarico dati API-Football...";
+        try {
+          await fetchAFForSingleMatch(m);
+          if (m.af) {
+            simH.value = Math.round(m.af.autoHL * 100);
+            simA.value = Math.round(m.af.autoAL * 100);
+          }
+          renderAFBox();
+          refreshSim();
+        } catch (err) {
+          msgEl.textContent = `❌ ${err?.message || "Errore"}`;
+          b.disabled = false;
+        }
+      };
+      return;
+    }
+
+    const fmtInj = (label, list, pct) => {
+      if (!list.length) return `<div><span class="text-slate-400">${esc(label)} (${pct}%):</span> <span class="text-emerald-400">Nessun assente segnalato</span></div>`;
+      return `<div><div class="text-slate-300 font-semibold">${esc(label)} (${pct}% • ${list.length} ass.):</div>
+        <div class="text-[10px] text-amber-200/90">${list.slice(0, 6).map(x => `${esc(x.name)} (${esc(x.reason || x.type)})`).join(" • ")}${list.length > 6 ? " ..." : ""}</div></div>`;
+    };
+    const hLu = m.af.lineups.find(x => x.isHome), aLu = m.af.lineups.find(x => !x.isHome);
+    const luHtml = (hLu || aLu)
+      ? `<div class="pt-1.5 border-t border-slate-800 space-y-1 text-[10px]">
+          <div class="font-bold text-emerald-300">📋 Formazioni Ufficiali</div>
+          ${hLu ? `<div><strong class="text-white">${esc(m.home)} (${esc(hLu.formation)})</strong>: <span class="text-slate-300">${esc(hLu.startXI.join(", "))}</span></div>` : ""}
+          ${aLu ? `<div><strong class="text-white">${esc(m.away)} (${esc(aLu.formation)})</strong>: <span class="text-slate-300">${esc(aLu.startXI.join(", "))}</span></div>` : ""}
+        </div>`
+      : `<div class="text-[10px] text-slate-500 pt-1 border-t border-slate-800">📋 Formazioni ufficiali non ancora uscite (escono ~45–60 min prima).</div>`;
+    const stH = m.af.statsH, stA = m.af.statsA;
+    const statsHtml = (stH && stA)
+      ? `<div class="pt-1.5 border-t border-slate-800 grid grid-cols-4 gap-1 text-center text-[10px] bg-slate-900/70 rounded-lg p-1.5">
+          <div><strong class="text-cyan-300">${esc(stH.xg ?? "-")} / ${esc(stA.xg ?? "-")}</strong><div class="text-slate-500">xG</div></div>
+          <div><strong class="text-white">${esc(stH.sog ?? "-")} / ${esc(stA.sog ?? "-")}</strong><div class="text-slate-500">Tiri Porta</div></div>
+          <div><strong class="text-white">${esc(stH.box ?? "-")} / ${esc(stA.box ?? "-")}</strong><div class="text-slate-500">In Area</div></div>
+          <div><strong class="text-white">${esc(stH.pos ?? "-")} / ${esc(stA.pos ?? "-")}</strong><div class="text-slate-500">Possesso</div></div>
+        </div>` : "";
+
+    afBox.innerHTML = `
+      <div class="flex justify-between items-center text-xs">
+        <span class="font-bold text-sky-300">🔬 API-Football: Assenze &amp; Formazioni</span>
+        <button id="btnRefreshSingleAF" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-sky-300">↻ Aggiorna</button>
+      </div>
+      <div class="space-y-1 text-[11px]">
+        ${fmtInj(m.home, m.af.injH, Math.round(m.af.autoHL * 100))}
+        ${fmtInj(m.away, m.af.injA, Math.round(m.af.autoAL * 100))}
+      </div>
+      ${luHtml}
+      ${statsHtml}`;
+    document.getElementById("btnRefreshSingleAF").onclick = async () => {
+      await fetchAFForSingleMatch(m);
+      if (m.af) { simH.value = Math.round(m.af.autoHL * 100); simA.value = Math.round(m.af.autoAL * 100); }
+      renderAFBox(); refreshSim();
+    };
+  };
 
   const updateEV = () => {
     document.getElementById("selectedMarketBadge").textContent = `${activePick.code} (${Math.round(activePick.prob * 100)}%)`;
@@ -670,6 +752,7 @@ function renderModalStructure(m) {
 
   simH.oninput = refreshSim; simA.oninput = refreshSim; bookInput.oninput = updateEV;
   document.getElementById("simResetBtn").onclick = () => { simH.value = 100; simA.value = 100; refreshSim(); };
+  renderAFBox();
   refreshSim();
 }
 
@@ -960,7 +1043,8 @@ document.getElementById("importHistInput").onchange = async e => {
 };
 
 document.getElementById("oddsFetchBtn").onclick = () => fetchOddsForCurrentDay(false);
-document.getElementById("oddsKeyBtn").onclick = openOddsKeyModal;
+document.getElementById("afBatchBtn").onclick = () => fetchAFForTopVisible();
+document.getElementById("oddsKeyBtn").onclick = openApiKeysModal;
 document.getElementById("autoCalToggle").onchange = e => { st.autoCal = e.target.checked; recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule(); };
 document.getElementById("marketBlendToggle").onchange = e => { st.useMarketBlend = e.target.checked; recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule(); };
 document.getElementById("onlyPlayableToggle").onchange = e => { st.onlyPlayable = e.target.checked; renderSchedule(); };
@@ -1001,7 +1085,7 @@ function shouldAutoRefreshToday() {
     if (LEAGUES.length) { recalcAllPredictions(); syncSlipFromLeagues(); renderSchedule(); }
   });
   await Promise.race([storagePromise, new Promise(res => setTimeout(res, 1500))]);
-  updateOddsStatusBar();
+  updateApiStatusBars();
   await loadDay(0);
   setInterval(() => {
     const modalOpen = !document.getElementById("detailModal").classList.contains("hidden");
