@@ -920,7 +920,10 @@ function calcPred(m, ov = {}, useCal = true, learningModel = null) {
     p1: sumWhere(home), px: sumWhere(draw), p2: sumWhere(away),
     pO: sumWhere(over), pU: 1 - sumWhere(over), pG: sumWhere(golFn), pNG: 1 - sumWhere(golFn)
   };
-  const v13Base = { probs: v13Probs, combos: [] };
+  const v13Base = { probs: v13Probs, combos: [
+    { code: "Over 1.5", prob: sumWhere(x => x.i + x.j >= 2) },
+    { code: "Under 3.5", prob: sumWhere(x => x.i + x.j <= 3) }
+  ] };
 
   let v14Applied = false;
   if (useCal && !learningModel && st.autoCal && typeof v14Candidate === "function" && typeof V14_DATA !== "undefined") {
@@ -1007,7 +1010,9 @@ function calcPred(m, ov = {}, useCal = true, learningModel = null) {
 
   const bestOddForPick = m.odds?.best?.[bestPick.code]?.odd;
   const priceOk = !bestOddForPick || (bestOddForPick * bestPick.prob >= 0.94);
-  const eligible = bestPick.prob >= 0.74 && conf >= 75 && !m.lowData && marketDiv < 0.14 && priceOk;
+  const legacyEligible = bestPick.prob >= 0.74 && conf >= 75 && !m.lowData && marketDiv < 0.14 && priceOk;
+  const reliability = typeof v15Audit === 'function' && useCal && !learningModel ? v15Audit({pick:bestPick, sample, conf, lowData:m.lowData, validMarket, marketDiv, calibrated:v14Applied, base:buildPickMap(v13Base)[bestPick.code], final:bestPick.prob, live:m.stateType === 'pre' && Number.isFinite(m.startTs) && Date.now() < m.startTs}) : null;
+  const eligible = reliability ? legacyEligible && reliability.passed : legacyEligible;
 
   let bestValue = null;
   if (m.odds?.best) {
@@ -1050,8 +1055,8 @@ function calcPred(m, ov = {}, useCal = true, learningModel = null) {
     lamH: lamH.toFixed(2), lamA: lamA.toFixed(2),
     probs: { p1, px, p2, pO, pU: 1 - pO, pG, pNG: 1 - pG },
     rawProbs, v13Base, v14Applied, marketDiv, bestValue,
-    bestPick, best1X2, ouPick, topScores, combos, confidence: conf, rankScore, eligible,
-    modelVersion: "13.0", calibrated: Boolean(ml?.active || v14Applied), ml: learningModel ? ml : undefined, mlActive: Boolean(ml?.active)
+    bestPick, best1X2, ouPick, topScores, combos, confidence: conf, rankScore, eligible, reliability,
+    modelVersion: reliability ? "15.0" : "13.0", calibrated: Boolean(ml?.active || v14Applied), ml: learningModel ? ml : undefined, mlActive: Boolean(ml?.active)
   };
 }
 

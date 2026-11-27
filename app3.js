@@ -834,7 +834,7 @@ function updateModalDynamic(m, ov = {}, selectedCode = null) {
       <div class="p-3 rounded-xl bg-slate-950 border border-slate-800">
         <div class="text-[11px] text-slate-400">Pronostico Top · ${p.mlActive ? "ML ibrido" : "Statistico"}${p.v14Applied ? " + V14" : ""}</div>
         <div class="text-xl font-extrabold text-cyan-400">${esc(p.bestPick.code)} <span class="text-sm text-cyan-200">@${fairOdd(p.bestPick.prob)}</span></div>
-        <div class="text-[11px] text-slate-300">${esc(p.bestPick.label)} (${(p.bestPick.prob * 100).toFixed(0)}%)</div>
+        <div class="text-[11px] text-slate-300">${esc(p.bestPick.label)} (${(p.bestPick.prob * 100).toFixed(0)}%)</div>${p.reliability ? `<div class="text-[11px] text-slate-300 mt-1">V15: ${p.eligible ? 'Controlli superati' : esc(p.reliability.reasons.join(' · ') || 'Filtro precedente non superato')} | N storico: ${p.reliability.historicalN} | limite inferiore storico: ${p.reliability.historicalLower === null ? '—' : (100*p.reliability.historicalLower).toFixed(1)+'%'}</div>` : ''}
       </div>
       <div class="p-3 rounded-xl border ${cs.bg} ${cs.border}">
         <div class="text-[11px] text-slate-300">Qualità dati (indice)</div>

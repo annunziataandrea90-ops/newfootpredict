@@ -21,6 +21,9 @@ function recalcAllPredictions() {
       if (!v13SnapshotReady) return;
       if (!snap) { predictionSnapshots[key] = { capturedAt: now, startTs: m.startTs, prediction: m.prediction }; changed = true; }
       predictionSnapshots[key].latest = { capturedAt: now, prediction: m.prediction };
+      if (!predictionSnapshots[key].v15 && m.prediction.reliability) {
+        predictionSnapshots[key].v15 = { capturedAt: now, code: m.prediction.bestPick.code, prob: m.prediction.bestPick.prob, audit: {...m.prediction.reliability, passed:m.prediction.eligible} };
+      }
       if (m.odds?.mktP1 && (m.startTs - now) <= 30 * 60 * 1000) {
         const closingMap = {
           "1": m.odds.mktP1, "X": m.odds.mktPX, "2": m.odds.mktP2,
@@ -49,7 +52,7 @@ function recalcAllPredictions() {
     for (const [k, v] of Object.entries(predictionSnapshots)) if (v.startTs < now - 180 * 86400000) delete predictionSnapshots[k];
     idbSet(SNAP_KEY, predictionSnapshots).catch(e => { console.warn('Snapshot non salvato', e); const el = document.getElementById('v13LiveStatus'); if (el) el.textContent = 'Errore persistenza snapshot: controllare spazio e IndexedDB.'; });
   }
-  v13LiveStatus(); if (typeof v14Render === "function") { try { v14Render(); } catch (e) { console.warn("V14 shadow render", e); } }
+  v13LiveStatus(); if (typeof v15Render === "function") v15Render(); if (typeof v14Render === "function") { try { v14Render(); } catch (e) { console.warn("V14 shadow render", e); } }
 }
 
 function updateApiStatusBars(customOdds = null, customAf = null) {
